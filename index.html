@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>实时偷拍 · 直播回放聚合播放器</title>
+<link rel="stylesheet" href="/dplayer.min.css">
+<script src="/hls.min.js"></script>
+<script src="/dplayer.min.js"></script>
+<style>
+:root{
+  --bg:#070a0f; --bg2:#0d1220; --panel:#101625; --panel2:#141c2f;
+  --line:rgba(255,255,255,.08); --txt:#eaf0ff; --dim:#8a93ad; --faint:#5a6480;
+  --acc:#14c5a6; --acc2:#0e9c82; --live:#ff3b5c; --ok:#37d67c; --warn:#ffb454;
+  --shadow:0 18px 50px -12px rgba(0,0,0,.75); --radius:18px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(20,197,166,.14), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(124,58,237,.16), transparent 60%),
+    var(--bg);
+  color:var(--txt); overflow-x:hidden;
+}
+a{color:var(--acc);text-decoration:none}
+button{font:inherit}
+
+/* 顶栏 */
+.topbar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:12px;
+  padding:12px 16px;backdrop-filter:blur(14px);
+  background:linear-gradient(180deg,rgba(7,10,15,.92),rgba(7,10,15,.66));border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand .logo{width:38px;height:38px;border-radius:12px;flex:none;display:grid;place-items:center;
+  background:conic-gradient(from 210deg,#14c5a6,#3b7bff,#a855f7,#14c5a6);
+  box-shadow:0 6px 18px -4px rgba(20,197,166,.55)}
+.brand .logo svg{width:20px;height:20px}
+.brand h1{font-size:15px;margin:0;font-weight:700;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand .sub{font-size:11px;color:var(--dim);margin-top:1px}
+.spacer{flex:1}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+  background:linear-gradient(180deg,var(--panel2),var(--panel));color:var(--txt);
+  padding:9px 14px;border-radius:12px;cursor:pointer;font-size:13px;font-weight:600;transition:.18s;white-space:nowrap}
+.btn:hover{border-color:rgba(20,197,166,.55);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#04211b}
+.btn svg{width:15px;height:15px}
+.btn[disabled]{opacity:.55;cursor:not-allowed}
+
+/* 布局 */
+.layout{display:grid;grid-template-columns:340px 1fr;gap:18px;padding:18px;max-width:1720px;margin:0 auto}
+.sidebar{display:flex;flex-direction:column;gap:14px;min-width:0}
+.card{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+
+/* 状态卡 */
+.statuscard{padding:14px 16px}
+.statuscard .row{display:flex;align-items:center;gap:10px;font-size:13px}
+.pulse{width:9px;height:9px;border-radius:50%;background:var(--live);animation:pulse 1.6s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,59,92,.55)}70%{box-shadow:0 0 0 9px rgba(255,59,92,0)}100%{box-shadow:0 0 0 0 rgba(255,59,92,0)}}
+.statuscard .meta{font-size:12px;color:var(--faint);margin-top:8px;line-height:1.55}
+.statuscard .meta b{color:var(--dim);font-weight:600}
+
+/* 工具区: 三栏目 tabs + 搜索 + 筛选 + 回放分页 */
+.tools{padding:12px}
+.tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.tab{padding:7px 13px;border-radius:10px;font-size:12.5px;font-weight:600;cursor:pointer;
+  border:1px solid var(--line);color:var(--dim);background:rgba(255,255,255,.03);transition:.15s;user-select:none}
+.tab.on{color:#04211b;background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent}
+.tab .n{font-size:10px;opacity:.7;margin-left:4px}
+.search{position:relative}
+.search input{width:100%;padding:10px 12px 10px 36px;border-radius:12px;border:1px solid var(--line);
+  background:rgba(255,255,255,.04);color:var(--txt);font-size:13px;outline:none;transition:.18s}
+.search input:focus{border-color:rgba(20,197,166,.55);background:rgba(20,197,166,.06)}
+.search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--faint)}
+.chips{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.chip{padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;cursor:pointer;
+  border:1px solid var(--line);color:var(--dim);background:rgba(255,255,255,.03);transition:.15s;user-select:none}
+.chip.on{color:#04211b;background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent}
+.replay-pager{display:flex;align-items:center;gap:8px;margin-top:10px}
+.pgbtn{flex:1;padding:8px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.03);
+  color:var(--dim);font-size:12px;font-weight:600;cursor:pointer;transition:.15s}
+.pgbtn:hover{border-color:rgba(20,197,166,.45);color:var(--txt)}
+.pgbtn[disabled]{opacity:.4;cursor:not-allowed}
+.pglabel{font-size:12px;color:var(--faint);font-family:ui-monospace,Consolas,monospace;min-width:60px;text-align:center}
+
+/* 频道列表 */
+.chanlist{padding:6px;max-height:calc(100vh - 420px);overflow:auto;min-height:160px}
+.chanlist::-webkit-scrollbar{width:8px}.chanlist::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}
+.chan{display:flex;gap:11px;align-items:center;padding:10px 12px;border-radius:13px;cursor:pointer;
+  border:1px solid transparent;transition:.15s;position:relative}
+.chan:hover{background:rgba(255,255,255,.045)}
+.chan.on{background:linear-gradient(90deg,rgba(20,197,166,.16),rgba(20,197,166,.03));border-color:rgba(20,197,166,.4)}
+.chan.on::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;
+  background:linear-gradient(var(--acc),var(--acc2))}
+.thumb{width:84px;height:52px;border-radius:9px;flex:none;overflow:hidden;background:#000;position:relative}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.livepill{position:absolute;left:5px;bottom:5px;font-size:9px;font-weight:800;letter-spacing:.5px;
+  background:rgba(255,59,92,.92);color:#fff;padding:2px 6px;border-radius:5px;display:flex;align-items:center;gap:4px}
+.livepill i{width:5px;height:5px;border-radius:50%;background:#fff;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.2}}
+.livepill.off{background:rgba(80,88,108,.92)}
+.livepill.replay{background:rgba(59,123,255,.92)}
+.chan .info{min-width:0;flex:1}
+.chan .t{font-size:13px;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.chan .s{font-size:11px;color:var(--faint);margin-top:3px;display:flex;align-items:center;gap:6px}
+.dot{width:6px;height:6px;border-radius:50%}
+.dot.on{background:var(--ok)}.dot.off{background:var(--faint)}
+.chan .idx{font-size:11px;color:var(--faint);font-weight:700;flex:none}
+.empty{padding:26px 10px;text-align:center;color:var(--faint);font-size:13px}
+
+/* 主播放区 */
+.main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.playercard{padding:14px}
+.stage{position:relative;width:100%;aspect-ratio:16/9;border-radius:14px;overflow:hidden;
+  background:radial-gradient(120% 120% at 50% 0%,#0e1526 0%,#05070c 70%);border:1px solid var(--line)}
+.stage::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:2;
+  background:linear-gradient(120deg,transparent 40%,rgba(20,197,166,.05) 50%,transparent 60%)}
+#player{width:100%;height:100%}
+.player-titlebar{display:flex;align-items:center;gap:10px;padding:4px 6px 12px}
+.badge{font-size:11px;font-weight:800;letter-spacing:1px;padding:4px 9px;border-radius:7px;
+  background:rgba(255,59,92,.16);color:var(--live);border:1px solid rgba(255,59,92,.4);
+  display:inline-flex;align-items:center;gap:5px;flex:none}
+.badge i{width:6px;height:6px;border-radius:50%;background:var(--live);animation:blink 1s infinite}
+.badge.vod{background:rgba(59,123,255,.16);color:#6ea8ff;border-color:rgba(59,123,255,.4)}
+.badge.vod i{background:#6ea8ff;animation:none}
+.pt{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.id{font-size:11px;color:var(--faint);font-family:ui-monospace,Consolas,monospace;flex:none}
+.infobar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ib-chip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);
+  background:rgba(255,255,255,.035);border:1px solid var(--line);padding:7px 12px;border-radius:10px}
+.ib-chip b{color:var(--txt);font-weight:600}
+.sw{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.sw.err{background:var(--live)}
+.sw.loading{background:var(--warn);animation:blink .8s infinite}
+.copybtn{margin-left:auto}
+.dplayer .dplayer-controller .dplayer-icon{color:#fff}
+.dplayer .dplayer-mask{background:#04060b}
+
+/* 移动端 */
+@media (max-width:1024px){
+  .layout{grid-template-columns:1fr}
+  .chanlist{max-height:none}
+  .main{order:1}.sidebar{order:2}
+}
+@media (max-width:720px){
+  .topbar{flex-wrap:wrap;gap:10px;padding:10px 12px}
+  .brand h1{font-size:14px}.brand .sub{display:none}
+  .btn{padding:8px 11px;font-size:12px}
+  .layout{padding:12px;gap:12px}
+  .statuscard .meta{display:none}
+  .tools{padding:10px}
+  .chan{padding:8px 10px}
+  .thumb{width:72px;height:44px}
+  .chan .t{font-size:12.5px;-webkit-line-clamp:1}
+  .playercard{padding:10px}
+  .player-titlebar{padding:2px 4px 8px}
+  .player-titlebar .pt{font-size:13px}
+  .infobar{gap:8px}
+  .ib-chip{font-size:11px;padding:6px 10px}
+}
+@media (max-width:480px){
+  .topbar{gap:8px}
+  .brand .logo{width:32px;height:32px}
+  .btn span{display:none}
+  .btn{padding:9px}
+  .stage{aspect-ratio:9/16}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16v10H4z" stroke="#04211b" stroke-width="2" stroke-linejoin="round"/><path d="M9 19h6" stroke="#04211b" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="11" r="2.2" fill="#04211b"/></svg>
+    </div>
+    <div>
+      <h1>实时偷拍 · 聚合播放器</h1>
+      <div class="sub">热门推荐 / 实时监控 / 精彩回放 · HLS 播放</div>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" id="btnShuffle" title="随机切换">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+    <span>随机</span>
+  </button>
+  <button class="btn" id="btnCopy" title="复制 m3u8">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4V4h11v1"/></svg>
+    <span>复制源</span>
+  </button>
+  <button class="btn" id="btnFull" title="全量刷新(含回放)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+    <span>全量</span>
+  </button>
+  <button class="btn primary" id="btnRefresh" title="刷新直播源">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-15.5 2M4 13V7h6"/></svg>
+    <span id="btnRefreshLabel">刷新</span>
+  </button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="card statuscard">
+      <div class="row">
+        <span class="pulse"></span>
+        <span id="statusText" style="font-weight:700">正在连接源列表…</span>
+      </div>
+      <div class="meta">
+        共 <b id="metaTotal">–</b> 路 · 在线 <b id="metaOnline">–</b> · 回放 <b id="metaReplay">–</b><br>
+        爬取于 <b id="metaTime">–</b>
+        <span id="metaAuto" style="margin-left:6px;color:var(--acc)">· 自动刷新开</span>
+      </div>
+    </div>
+
+    <div class="card tools">
+      <div class="tabs" id="tabs">
+        <span class="tab on" data-sec="all">全部<span class="n" id="nAll"></span></span>
+        <span class="tab" data-sec="hot">热门<span class="n" id="nHot"></span></span>
+        <span class="tab" data-sec="live">监控<span class="n" id="nLive"></span></span>
+        <span class="tab" data-sec="replay">回放<span class="n" id="nReplay"></span></span>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+        <input id="search" type="text" placeholder="搜索视频标题…" autocomplete="off">
+      </div>
+      <div class="chips">
+        <span class="chip on" data-f="all">全部</span>
+        <span class="chip" data-f="online">仅在线</span>
+        <span class="chip" data-f="m3u8">可播放</span>
+      </div>
+      <div class="replay-pager" id="replayPager" style="display:none">
+        <button class="pgbtn" id="pgPrev">‹ 上一页</button>
+        <span class="pglabel" id="pgLabel">1 / 1</span>
+        <button class="pgbtn" id="pgNext">下一页 ›</button>
+      </div>
+    </div>
+
+    <div class="card chanlist" id="chanList"></div>
+  </aside>
+
+  <main class="main">
+    <div class="card playercard">
+      <div class="stage" id="stage">
+        <div id="player"></div>
+      </div>
+      <div class="player-titlebar">
+        <span class="badge" id="liveBadge"><i></i>LIVE</span>
+        <span class="pt" id="ptitle">加载中…</span>
+        <span class="id" id="pid"></span>
+      </div>
+      <div class="infobar">
+        <span class="ib-chip"><span class="sw" id="sw"></span><span id="swText">已就绪</span></span>
+        <span class="ib-chip">分辨率 <b id="resInfo">–</b></span>
+        <button class="btn copybtn" id="btnCopy2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4V4h11v1"/></svg>
+          复制 m3u8
+        </button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const API = { sources:'/api/sources', refresh:'/api/refresh', probe:(id)=>'/api/probe/'+id, stream:(id)=>'/api/stream/'+id };
+
+  const PAGE_SIZE = 30;          // 每页展示的回放条数
+  let items = [];                // 全量(带 m3u8)
+  let allItems = [];             // 全量(含无 m3u8 的, 用于分页)
+  let section = 'all';           // all|hot|live|replay
+  let filter = 'all';            // all|online|m3u8
+  let q = '';
+  let replayPage = 1;
+  let current = null;
+  let dp = null;
+  let autoPollTimer = null;
+  let reconnecting = false;
+  const sleepMs = ms => new Promise(r=>setTimeout(r,ms));
+
+  // 校验子集 m3u8 里的 key/分片是否仍可达(签名未过期)。
+  // 直播流 180s 刷新, 子集 20s 缓存: 若 auth_key 过期, key/分片 403,
+  // 此时回退到完整 m3u8(CDN 直拉, 浏览器侧拿的是服务端当下缓存的 key, 概率更高)。
+  async function freshStreamUrl(id, subM3u8){
+    try{
+      const keyM = subM3u8.match(/URI="([^"]+)"/);
+      if (keyM){
+        const kr = await fetch(keyM[1], { method:'GET', cache:'no-store', signal: AbortSignal.timeout(6000) });
+        if (kr.ok){
+          const kb = await kr.arrayBuffer();
+          if (kb.byteLength === 16) return API.stream(id);   // 签名有效, 用秒播子集
+        }
+        console.warn('[play] 子集 key 不可用('+kr.status+') → 回退完整 m3u8');
+        return null;
+      }
+      const seg = subM3u8.split('\n').find(l=>l.includes('.ts')||l.startsWith('http'));
+      if (seg){
+        const sr = await fetch(seg, { cache:'no-store', signal: AbortSignal.timeout(8000) });
+        if (sr.ok) return API.stream(id);
+        console.warn('[play] 子集分片不可用('+sr.status+') → 回退完整 m3u8');
+        return null;
+      }
+      return API.stream(id);
+    }catch(e){
+      console.warn('[play] 子集预检异常 → 回退完整 m3u8');
+      return null;
+    }
+  }
+
+  // 自动播放被浏览器策略拒绝时, 显示"点击播放"遮罩
+  function showPlayOverlay(){
+    let ov = document.getElementById('playOverlay');
+    if (!ov){
+      ov = document.createElement('div');
+      ov.id = 'playOverlay';
+      ov.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer">'
+        + '<div style="width:64px;height:64px;border-radius:50%;background:rgba(20,197,166,.9);display:grid;place-items:center;box-shadow:0 8px 24px rgba(0,0,0,.5)">'
+        + '<svg width="28" height="28" viewBox="0 0 24 24" fill="#04211b"><path d="M8 5v14l11-7z"/></svg></div>'
+        + '<div style="font-size:14px;font-weight:700;color:#fff">点击开启播放</div>'
+        + '<div style="font-size:11px;color:rgba(255,255,255,.6)">浏览器自动播放策略已拦截, 点一下即可</div></div>';
+      ov.style.cssText = 'position:absolute;inset:0;z-index:10;display:grid;place-items:center;background:rgba(4,6,11,.55);backdrop-filter:blur(2px)';
+      const stage = document.getElementById('stage');
+      stage.appendChild(ov);
+      ov.addEventListener('click', async ()=>{
+        ov.remove();
+        const v = dp && dp.video;
+        if (v){ v.muted = false; v.volume = 0.7; v.play().catch(()=>{}); }
+        // 触发用户手势, 解除自动播放限制
+      });
+    } else {
+      ov.style.display = 'grid';
+    }
+  }
+
+  // ---------- 状态 ----------
+  function setStatus(cls, text){
+    const sw=$('#sw'); sw.className='sw '+(cls||'');
+    $('#swText').textContent = text||'已就绪';
+  }
+  function fmtTime(iso){
+    if(!iso) return '–';
+    const d=new Date(iso);
+    return d.toLocaleString('zh-CN',{hour12:false,year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  }
+  function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+  // ---------- 数据 ----------
+  async function load(){
+    try{
+      window.__loadStep = 'fetch';
+      const r = await fetch(API.sources,{cache:'no-store'});
+      window.__loadStep = 'json';
+      const data = await r.json();
+      allItems = data.items||[];
+      items = allItems.filter(x=>x && x.m3u8 && x.hasM3u8!==false);
+      window.__loadStep = 'render';
+      // tab 数字
+      $('#nAll').textContent = allItems.length;
+      $('#nHot').textContent = allItems.filter(x=>x.section==='hot').length;
+      $('#nLive').textContent = allItems.filter(x=>x.section==='live'||x.alsoLive).length;
+      $('#nReplay').textContent = allItems.filter(x=>x.section==='replay').length;
+      $('#metaTotal').textContent = allItems.length;
+      $('#metaOnline').textContent = items.filter(x=>x.status==='online').length;
+      $('#metaReplay').textContent = allItems.filter(x=>x.section==='replay').length;
+      $('#metaTime').textContent = fmtTime(data.crawledAt);
+      if (data.refreshSec){ $('#metaAuto').textContent = '· 自动刷新 ' + data.refreshSec + 's'; }
+      const online = items.filter(x=>x.status==='online').length;
+      $('#statusText').textContent = `已载入 ${allItems.length} 路 · ${online} 路在线`;
+      // 若当前页在回放, 调整到页内
+      window.__loadStep = 'renderList';
+      renderList();
+      window.__loadStep = 'selectFirst';
+      if(items.length && !current){ selectFirst(); }
+      window.__loadStep = 'done';
+    }catch(e){
+      $('#statusText').textContent='源列表加载失败，请点「刷新源」';
+      if (typeof console !== 'undefined') console.error('[load] 失败:', e);
+    }
+  }
+
+  // 按栏目 + 筛选 + 搜索取列表
+  function sectionItems(){
+    let v = items;
+    if (section==='hot') v = v.filter(x=>x.section==='hot');
+    else if (section==='live') v = v.filter(x=>x.section==='live' || x.alsoLive===true);
+    else if (section==='replay') v = v.filter(x=>x.section==='replay');
+    if (filter==='online') v = v.filter(x=>x.status==='online');
+    if (filter==='m3u8') v = v.filter(x=>x.m3u8);
+    if (q) v = v.filter(x=>(x.title||'').toLowerCase().includes(q.toLowerCase()));
+    return v;
+  }
+
+  // 排序: 热门>监控>回放, 在线优先
+  function sortItems(v){
+    const sec = s=>({hot:0,live:1,replay:2}[s]||3);
+    return [...v].sort((a,b)=>{
+      const sa=sec(a.section), sb=sec(b.section);
+      if (sa!==sb) return sa-sb;
+      if (a.status!==b.status) return (a.status==='online'?0:1)-(b.status==='online'?0:1);
+      return String(a.id).localeCompare(String(b.id), undefined, {numeric:true});
+    });
+  }
+
+  function renderList(){
+    const list = $('#chanList');
+    let v = sortItems(sectionItems());
+    // 回放分页
+    const isReplayOnly = section==='replay';
+    $('#replayPager').style.display = isReplayOnly ? 'flex' : 'none';
+    let pageItems = v;
+    if (isReplayOnly){
+      const total = Math.max(1, Math.ceil(v.length / PAGE_SIZE));
+      if (replayPage > total) replayPage = total;
+      pageItems = v.slice((replayPage-1)*PAGE_SIZE, replayPage*PAGE_SIZE);
+      $('#pgLabel').textContent = replayPage + ' / ' + total;
+      $('#pgPrev').disabled = replayPage<=1;
+      $('#pgNext').disabled = replayPage>=total;
+    }
+    if(!pageItems.length){
+      list.innerHTML = '<div class="empty">没有匹配的视频<br><small>试试清空搜索或「全量」刷新</small></div>';
+      return;
+    }
+    list.innerHTML = pageItems.map((it,i)=>{
+      const on = current && current.id===it.id;
+      const online = it.status==='online';
+      const isReplay = it.section==='replay';
+      const pill = isReplay ? `<span class="livepill replay">回放</span>`
+        : `<span class="livepill ${online?'':'off'}"><i></i>${online?'LIVE':'OFF'}</span>`;
+      return `<div class="chan ${on?'on':''}" data-id="${it.id}">
+        <span class="idx">${String(i+1).padStart(2,'0')}</span>
+        <div class="thumb">
+          ${it.cover?`<img loading="lazy" src="${it.cover}" alt="">`:''}
+          ${pill}
+        </div>
+        <div class="info">
+          <div class="t">${esc(it.title)}</div>
+          <div class="s">
+            <span class="dot ${online?'on':'off'}"></span>
+            ${isReplay?'回放 VOD':'直播'} · ${it.sectionLabel||''} · #${it.id}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.chan').forEach(el=>{
+      el.addEventListener('click',()=>{
+        const it = items.find(x=>String(x.id)===el.dataset.id);
+        if(it) play(it);
+      });
+    });
+  }
+
+  function selectFirst(){
+    const v = sortItems(sectionItems());
+    if (v.length) play(v[0]);
+  }
+
+  // ---------- 播放 ----------
+  async function play(it){
+    current = it;
+    renderList();
+    $('#ptitle').textContent = it.title;
+    $('#pid').textContent = '#'+it.id;
+    const isReplay = it.section==='replay';
+    const badge = $('#liveBadge');
+    if (isReplay){ badge.className='badge vod'; badge.innerHTML='<i></i>回放'; }
+    else { badge.className='badge'; badge.innerHTML='<i></i>LIVE'; }
+    setStatus('loading','连接流…');
+
+    if(typeof DPlayer==='undefined'){ setStatus('err','播放器核心未加载'); return; }
+    if(dp) dp.destroy();
+
+    // 轻量子集(末 6 片)优先 → 秒播; 回退完整 m3u8
+    let subM3u8 = null;
+    try{
+      const pr = await fetch(API.probe(it.id),{cache:'no-store'});
+      if (pr.ok){
+        const pj = await pr.json();
+        if (pj && pj.ok && pj.probeM3u8) subM3u8 = pj.probeM3u8;
+      }
+    }catch(e){}
+
+    const useSub = !!subM3u8;
+    // 这些流是"准 VOD"(带 #EXT-X-ENDLIST, 静态尾部, 不滚动) → 一律按 VOD 语义播。
+    // hls.js 子集(末 6 片)从 0 播即从尾段开始, 秒到末尾; 完整 m3u8 也 ENDLIST → 可定位末尾。
+    const lowLat = {
+      maxBufferLength: 15, maxMaxBufferLength: 30, maxBufferHole: 0.1,
+      fragLoadingTimeOut: 15000, manifestLoadingTimeOut: 10000,
+      // VOD: 不设 live 相关字段; startPosition 默认 0(子集尾段从 0 播即最新)
+    };
+
+    // 子集 auth_key 可能过期: 预检 key/分片可达性, 不可达就回退完整 m3u8
+    let playUrl = it.m3u8;
+    if (useSub){
+      const fresh = await freshStreamUrl(it.id, subM3u8);
+      playUrl = fresh || it.m3u8;
+    }
+
+    // 关键修复: Chromium/Electron 的 video.canPlayType('application/vnd.apple.mpegurl')
+    // 返回 "maybe"(非空), DPlayer 据此把 type 改回 "normal" 走原生路径,
+    // hls.js 插件从不接管 → 原生 HLS 不拉 AES-128 key/分片 → 永远转圈。
+    // 这里给 HTMLVideoElement.prototype.canPlayType 打一次性补丁: m3u8 系 MIME
+    // 返回 '', 强制 DPlayer 保留 type='hls' 走 hls.js(new Hls + loadSource + attachMedia)。
+    // 全局只 patch 一次。
+    if (!window.__hlsCanPlayTypePatched){
+      window.__hlsCanPlayTypePatched = true;
+      const origCPT = HTMLVideoElement.prototype.canPlayType;
+      HTMLVideoElement.prototype.canPlayType = function(mime){
+        if (typeof mime === 'string' && /mpegurl|x-mpegurl|hls/i.test(mime)) return '';
+        return origCPT.call(this, mime);
+      };
+    }
+
+    dp = new DPlayer({
+      container: $('#player'),
+      theme:'#14c5a6',
+      live: false,                     // 一律 VOD(流带 ENDLIST, 非无限直播)
+      loop: true,                     // 播完循环
+      autoplay:true, autoplayVideo:true,
+      hotkey:false, mutex:true, screenshot:false, diskStorage:false,
+      volume:0.7,
+      video:{
+        // 用服务端 /api/stream/:id(inline 子集 m3u8, 带 CORS + ENDLIST VOD 语义),
+        // hls.js 以真正的 HLS 流接管(强制 type='hls', 不走原生 video.src);
+        // 子集签名过期时回退完整 m3u8。不用 Blob URL(它让 DPlayer 走原生
+        // video.src, Chromium 下 hls.js 不接管 → 永远转圈)。
+        url: playUrl,
+        type: 'hls',
+      },
+      pluginOptions:{ hls: lowLat },
+      contextmenu:[
+        { label:'在新窗口打开原详情页', onClick(){ if(current) window.open(current.detailUrl,'_blank'); } },
+        { label:'复制完整 m3u8', onClick(){ if(current) copyText(current.m3u8); } },
+      ],
+      events:{
+        ready(){ setStatus('','已就绪'); },
+        play(){ setStatus('','播放中'); },
+        pause(){ if (!dp || dp.video.readyState < 3) setStatus('loading','已暂停'); },
+        waiting(){ setStatus('loading','缓冲中…'); },
+        canplay(){ setStatus('','播放中'); },
+        ended(){ /* loop 续播 */ },
+        error(){
+          setStatus('err','源中断 · 自动重连…');
+          if (!reconnecting){
+            reconnecting = true;
+            setTimeout(async ()=>{
+              try{
+                await fetch(API.refresh,{method:'POST'});
+                await sleepMs(2500);
+                await load();
+                if (current) play(current);
+              }catch(e){}
+              reconnecting = false;
+            }, 1800);
+          }
+        },
+      },
+    });
+
+    dp.on('timeupdate', function(){
+      // 实际出帧推进时, 把 "连接流…" 升级为 "播放中"(DPlayer 的 play 事件不一定按预期触发)
+      const v = dp && dp.video;
+      if (v && !v.paused && v.currentTime > 0.5){
+        const sw = $('#swText');
+        if (sw && sw.textContent === '连接流…') setStatus('', '播放中');
+      }
+    });
+    // hls.js 错误可视化
+    setTimeout(()=>{
+      try{
+        const ph = dp && dp.plugins && dp.plugins.hls;
+        if (ph){
+          ph.on('hlsError', function(e, data){
+            console.warn('[hls.js]', data.type, data.details, 'fatal='+!!data.fatal, data.reason||'');
+            if (data.fatal && !reconnecting){
+              reconnecting = true;
+              setStatus('err','源中断 · 自动重连…');
+              setTimeout(async ()=>{
+                try{
+                  await fetch(API.refresh,{method:'POST'});
+                  await sleepMs(2500);
+                  await load();
+                  if (current) play(current);
+                }catch(err){}
+                reconnecting = false;
+              }, 1800);
+            }
+          });
+        }
+      }catch(e){}
+    }, 600);
+
+    startAutoPolling();
+  }
+
+  // ---------- 复制 ----------
+  async function copyText(t){
+    try{ await navigator.clipboard.writeText(t); flash('✓ 已复制'); }
+    catch(e){
+      const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove(); flash('✓ 已复制');
+    }
+  }
+  function flash(m){ const el=$('#swText'); const old=el.textContent; el.textContent=m; setTimeout(()=>el.textContent=old,1200); }
+
+  // ---------- 事件 ----------
+  $('#search').addEventListener('input',e=>{ q=e.target.value.trim(); renderList(); });
+  document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{
+    document.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));
+    c.classList.add('on'); filter=c.dataset.f; renderList();
+  }));
+  document.querySelectorAll('#tabs .tab').forEach(t=>t.addEventListener('click',()=>{
+    document.querySelectorAll('#tabs .tab').forEach(x=>x.classList.remove('on'));
+    t.classList.add('on'); section=t.dataset.sec; replayPage=1; renderList();
+    if (section!=='all' && !current || (section!=='all' && current && current.section!==section)){ selectFirst(); }
+  }));
+  $('#pgPrev').addEventListener('click',()=>{ replayPage=Math.max(1,replayPage-1); renderList(); });
+  $('#pgNext').addEventListener('click',()=>{ replayPage++; renderList(); });
+
+  function doRefresh(full){
+    const b = full ? $('#btnFull') : $('#btnRefresh');
+    const label = full ? b.querySelector('span') : $('#btnRefreshLabel');
+    b.disabled = true; label.textContent = '爬取中…';
+    setStatus('loading', full?'全量爬取(含回放 600+条, 需几分钟)…':'爬取直播源…');
+    fetch(API.refresh + (full?'?full=1':''), {method:'POST'})
+      .then(r=>r.json())
+      .then(j=>{
+        if (j.ok){
+          const timer=setInterval(async()=>{
+            try{
+              const s = await fetch('/api/status').then(x=>x.json());
+              if(!s.running){
+                clearInterval(timer);
+                b.disabled=false; label.textContent = full?'全量':'刷新';
+                setStatus('',''); load();
+              }
+            }catch(e){}
+          }, 1500);
+        } else {
+          b.disabled=false; label.textContent = full?'全量':'刷新';
+          setStatus('err', j.message||'刷新失败');
+        }
+      })
+      .catch(e=>{ b.disabled=false; label.textContent = full?'全量':'刷新'; setStatus('err','刷新请求失败：'+e.message); });
+  }
+  $('#btnRefresh').addEventListener('click',()=>doRefresh(false));
+  $('#btnFull').addEventListener('click',()=>doRefresh(true));
+  $('#btnShuffle').addEventListener('click',()=>{ const v=sortItems(sectionItems()); if(v.length) play(v[Math.floor(Math.random()*v.length)]); });
+  $('#btnCopy').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
+  $('#btnCopy2').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
+
+  document.addEventListener('keydown',e=>{
+    if(e.target.tagName==='INPUT') return;
+    if(e.key>='1'&&e.key<='9'){
+      const v=sortItems(sectionItems()); const it=v[parseInt(e.key,10)-1]; if(it) play(it);
+    }
+  });
+
+  // ---------- 自适应监测 ----------
+  function updateRes(){
+    if(!dp||!dp.video) return;
+    const v=dp.video;
+    if(v.videoWidth){ $('#resInfo').textContent = v.videoWidth+'×'+v.videoHeight; }
+  }
+  setInterval(updateRes, 1500);
+
+  // ---------- 自动轮询(带可见性门控: 后台 tab 暂停, 回前台立即补一次) ----------
+  function startAutoPolling(){
+    if (autoPollTimer) return;
+    autoPollTimer = setInterval(async ()=>{
+      // 后台 tab 不轮询(省源站请求, 7×24 不挂机刷爆 CDN), 回前台立即补
+      if (document.hidden) return;
+      const cur = current ? current.id : null;
+      await load();
+      if (cur){ const still = items.find(x=>String(x.id)===cur); current = still || current; }
+    }, 60000);
+    document.addEventListener('visibilitychange', ()=>{
+      if (!document.hidden && current){ load(); }   // 回前台: 立即刷新一回
+    });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

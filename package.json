@@ -1,0 +1,19 @@
+{
+  "name": "91cg-live-player",
+  "version": "3.0.0",
+  "description": "91cg1 real-time live aggregation player - 7x24 always-on edition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "crawl:fast": "node crawl_91cg1.js live_sources.json --live-only",
+    "crawl:replay": "node crawl_91cg1.js live_sources.json --replay",
+    "crawl:full": "node crawl_91cg1.js live_sources.json --full",
+    "crawl:single": "node crawl_91cg1.js live_sources.json --single 11052",
+    "test:load": "node load_test.js",
+    "test:fault": "node fault_injection.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

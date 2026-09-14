@@ -1,0 +1,58 @@
+# 运行时生成文件
+live_sources.json
+live_sources.json.tmp
+server.log
+server.err.log
+server.pid
+
+# Chrome/Electron 测试 profile(开发期生成, 不提交)
+chrome_*/
+
+# 开发期诊断/测试脚本(根目录, 不参与运行, 不提交)
+api_check.js
+acceptance.js
+check*.js
+chk*.js
+debug_*.js
+diag*.js
+dl.js
+e2e*.js
+extract_inline.js
+fault_injection.js
+final_*.js
+inspect_*.js
+load_test.js
+probe*.js
+refresh_check.js
+server_probe_check.js
+wait_full.js
+warmup_stream.js
+verify*.js
+verify_*.js
+git_deploy_list.txt
+m3u8_清单.txt
+_test.txt
+_crawltimer.json
+_inline.js
+test_hot.json
+test_hot2.json
+test_preserve.json
+browser_diag*.js
+browser_diag.js
+browser_diag2.js
+check_electron.js
+
+# test/ 目录下的压测脚本要提交
+!test/fault_injection.js
+!test/load_test.js
+
+# 爬虫包
+dplayer.tgz
+*.map
+
+# 日志
+*.log
+
+# macOS/Windows
+.DS_Store
+Thumbs.db
