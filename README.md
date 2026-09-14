@@ -21,7 +21,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone <本仓库地址> && cd <目录>
+git clone https://github.com/cheshi888/live-player.git && cd live-player
 
 # 2. 启动（Linux/macOS）
 ./start.sh
@@ -180,8 +180,8 @@ GET  /api/status            爬虫状态/日志/双定时器
 
 ```bash
 # 克隆并一键部署
-git clone <本仓库地址>
-cd <目录>
+git clone https://github.com/cheshi888/live-player.git
+cd live-player
 ./deploy.sh
 ```
 
