@@ -19,6 +19,16 @@
 
 ## 快速开始
 
+### 一行命令拉取并部署（Linux / macOS）
+
+```bash
+sh -c 'cd /tmp 2>/dev/null && (git clone -q https://github.com/cheshi888/live-player.git live-player 2>/dev/null || cd live-player && git pull -q) && cd live-player && sh oneclick.sh'
+```
+
+> 等价于「克隆（已存在则拉取更新）→ 一键部署 → 输出访问地址」。首次与后续更新都用这一行。
+
+### 分步执行
+
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/cheshi888/live-player.git && cd live-player
@@ -32,6 +42,7 @@ git clone https://github.com/cheshi888/live-player.git && cd live-player
 ```
 
 一键部署脚本 `deploy.sh` 会完成：克隆/更新 → 启动 → 健康检查 → 输出访问地址。详见[一键部署](#一键部署)。
+`oneclick.sh` 在其基础上叠加「拉取/克隆」，做到一行命令直达部署。
 
 ## 抓取范围（三栏目）
 
@@ -83,6 +94,7 @@ git clone https://github.com/cheshi888/live-player.git && cd live-player
 | `live_sources.json` | 全量 m3u8 源（爬虫自动维护，7×24 运行中持续刷新） |
 | `start.sh` / `start.ps1` | 跨平台启动脚本（Linux/macOS / Windows） |
 | `deploy.sh` | 一键部署（克隆/更新 + 启动 + 健康检查） |
+| `oneclick.sh` | **一行命令拉取并部署**（已存在则 pull，不存在则 clone，再调 deploy.sh） |
 | `README.md` | 本文件 |
 | `package.json` | 依赖声明（仅 Node.js 内置模块，无第三方依赖） |
 | `test/load_test.js` | 20 并发 × 60s API 压测 |
@@ -176,6 +188,16 @@ GET  /api/status            爬虫状态/日志/双定时器
 
 ## 一键部署
 
+### 一行命令（拉取 + 部署，推荐）
+
+```bash
+sh -c 'cd /tmp 2>/dev/null && (git clone -q https://github.com/cheshi888/live-player.git live-player 2>/dev/null || cd live-player && git pull -q) && cd live-player && sh oneclick.sh'
+```
+
+`oneclick.sh` 自动判断：目录已存在 → `git pull` 更新；不存在 → `git clone` 克隆；然后调用 `deploy.sh` 启动 + 健康检查 + 输出访问地址。
+
+### 分步执行
+
 `deploy.sh` 完成全流程（Linux/macOS；Windows 用 `start.ps1`）：
 
 ```bash
@@ -198,7 +220,7 @@ cd live-player
 fuser -k 8090/tcp          # 或 lsof -ti:8090 | xargs kill
 
 # 重新部署（更新代码后）
-git pull && ./deploy.sh
+./oneclick.sh              # 或: git pull && ./deploy.sh
 ```
 
 建议用 `systemd` / `pm2` / `screen` 做 supervisor，崩溃自动拉起（`deploy.sh` 启动的进程本身已有进程级防线，外部 supervisor 是双保险）。
