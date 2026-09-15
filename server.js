@@ -60,15 +60,15 @@ function parseM3U8(full, id){
 
 // 在途去重: 同一 m3u8Url 并发只发一次
 const inflight = new Map(); // m3u8Url -> Promise
-async function fetchM3U8Cached(id, m3u8Url, referer, retries = 2){
+async function fetchM3U8Cached(id, m3u8Url, referer, retries = 3){
   const cached = m3u8CacheGet(id, m3u8Url);
-  if (cached) return cached;                       // 命中缓存(同 URL, 20s 内) → 毫秒级
+  if (cached) return cached;                       // 命中缓存(同 URL, 60s 内) → 毫秒级
   if (inflight.has(m3u8Url)) return inflight.get(m3u8Url);
   const p = (async () => {
     let lastErr;
     for (let i = 0; i <= retries; i++){
       try {
-        const r = await fetch(m3u8Url, { headers:{ 'User-Agent':UA, 'Referer': referer||'https://www.91cg1.com/' }, signal: AbortSignal.timeout(15000) });
+        const r = await fetch(m3u8Url, { headers:{ 'User-Agent':UA, 'Referer': referer||'https://www.91cg1.com/' }, signal: AbortSignal.timeout(20000) });
         if (!r.ok) throw new Error('HTTP '+r.status);
         const full = await r.text();
         if (!full.trim().startsWith('#EXTM3U')) throw new Error('m3u8 内容异常');
@@ -78,11 +78,15 @@ async function fetchM3U8Cached(id, m3u8Url, referer, retries = 2){
         return entry;
       } catch (e) {
         lastErr = e;
+        const msg = String(e.message||e);
         // 源站签名 URL 的 m3u8/key/分片带一次性 auth_key, 过期 403/404 时
         // 重试同一 URL 无意义(签名已死), 立即抛出交给上层重爬拿新签名
-        if (/HTTP (403|404)/.test(String(e.message))) break;
-        // 其余(CDN 偶发 400/5xx/超时): 同 URL 重试, 间隔 800ms
-        if (i < retries){ await sleep(800 * (i + 1)); }
+        if (/HTTP (403|404)/.test(msg)) break;
+        // CDN 偶发 400/5xx/超时: 指数退避重试(2s,4s,8s), 不立即撞同一故障窗口
+        if (i < retries){
+          const backoff = [2000, 4000, 8000][i] || 8000;
+          await sleep(backoff);
+        }
       }
     }
     throw lastErr;
@@ -200,14 +204,23 @@ async function probeStream(id){
           entry = await fetchM3U8Cached(id, it2.m3u8, it2.detailUrl);
           it.m3u8 = it2.m3u8; writeSources(data2);
           log("单条自愈成功(#"+id+") 耗时 "+((Date.now()-started)/1000).toFixed(1)+"s");
-        } catch(e2){ return { ok:false, message:'单条重爬后重试失败: '+e2.message, http:502 }; }
+        } catch(e2){
+          // 回退旧缓存(让 hls.js 继续播), 拿不到才 502
+          const stale = M3U8_CACHE.get(String(id));
+          if (stale){ log("回退旧缓存(#"+id+")"); entry = stale; }
+          else return { ok:false, message:'单条重爬后重试失败: '+e2.message, http:502 };
+        }
       } else {
         // 单条重爬没拿到新 m3u8(源站可能临时下线): 原 URL 再试一次
         log("单条重爬无新源(#"+id+") → 原 URL 重试");
         try {
           M3U8_CACHE.delete(String(id));
           entry = await fetchM3U8Cached(id, it.m3u8, it.detailUrl);
-        } catch(e2){ return { ok:false, message:'签名失效且单条重爬无新源', http:502 }; }
+        } catch(e2){
+          const stale = M3U8_CACHE.get(String(id));
+          if (stale){ log("回退旧缓存(#"+id+")"); entry = stale; }
+          else return { ok:false, message:'签名失效且单条重爬无新源', http:502 };
+        }
       }
     } else {
       // 非签名失效(CDN 偶发/超时): 清缓存重试一次
@@ -215,7 +228,12 @@ async function probeStream(id){
       M3U8_CACHE.delete(String(id));
       try {
         entry = await fetchM3U8Cached(id, it.m3u8, it.detailUrl);
-      } catch(e2){ return { ok:false, message:'重试失败: '+e2.message, http:502 }; }
+      } catch(e2){
+        // CDN 故障窗口: 回退旧缓存(签名没死还能播), 拿不到才 502
+        const stale = M3U8_CACHE.get(String(id));
+        if (stale){ log("CDN 故障, 回退旧缓存(#"+id+")"); entry = stale; }
+        else return { ok:false, message:'CDN 故障且无缓存: '+e2.message, http:502 };
+      }
     }
   }
 
@@ -390,6 +408,24 @@ const server = http.createServer((req, res) => {
         const out = await probeStream(id);
         if (out.ok){
           return httpRespond(res, 200, 'application/vnd.apple.mpegurl; charset=utf-8', out.probeM3u8);
+        }
+        // 502(CDN 故障) 时回退: 把完整 m3u8 URL 直接给 hls.js 去 CDN 拉(签名还有效, CDN 偶发故障窗口期
+        // 用回退给 hls.js 一条"直连 CDN"的路径, 而不是直接 502 让 hls.js 进 fatal manifestLoadError)
+        if (out.http === 502){
+          const data2 = readSources();
+          const it2 = (data2.items||[]).find(x => String(x.id)===String(id));
+          if (it2 && it2.m3u8){
+            // 返回一个"重定向式" m3u8: 让 hls.js 直接拉完整 CDN URL(绕开本地 502)
+            log("stream 回退(#"+id+") → 给 hls.js 直连 CDN 完整 m3u8");
+            const fallback = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n' + it2.m3u8 + '\n';
+            // 注: hls.js 支持 manifest 里写 URI 跳转, 但更稳的是直接 302 重定向
+            res.writeHead(302, {
+              'Location': it2.m3u8,
+              'Access-Control-Allow-Origin':'*',
+              'Cache-Control':'no-store',
+            });
+            return res.end();
+          }
         }
         return httpRespond(res, out.http||500, 'application/json', JSON.stringify({ok:false, message:out.message}));
       }

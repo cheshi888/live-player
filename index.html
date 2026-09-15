@@ -333,12 +333,34 @@ button{font:inherit}
             await load();
             if (current) play(current);
           } else {
-            // 签名真失效 → 单条重抓拿新 auth_key(秒级), 标记 via=reconnect 便于区分手动/自动
+            // probe 失败分两种: 403(签名死, 需重抓) / 502(CDN 故障, 等恢复)
+            // 502 = CDN 偶发, 单条重抓也是打 CDN, 只会雪上加霜 → 退避等待, 不重抓
+            const probeStatus = pr.status;
+            if (probeStatus === 502){
+              // CDN 故障窗口: 延长退避(每次 2x, 封顶 60s), 期间只重建播放器(服务端已回退旧缓存)
+              reconnectAttempts++;
+              if (reconnectAttempts > 8){
+                reconnectPausedUntil = Date.now() + 120000;
+                setStatus('err','CDN 故障 · 120s 后重试');
+                reconnecting = false;
+                return;
+              }
+              setStatus('err','CDN 故障 · 等待恢复(尝试 ' + reconnectAttempts + ')…');
+              // 服务端 probe 失败时已回退 60s 旧缓存, 直接重建播放器即可继续播
+              await load();
+              if (current) play(current);
+              reconnecting = false;
+              return;
+            }
+            // 403 签名真失效 → 单条重抓拿新 auth_key(秒级), 标记 via=reconnect 便于区分手动/自动
             // 但播放锁保护: 正在出帧则跳过重抓(避免轮换 URL 打死播放), 退避后再试
             if (playingLock && playingLock.id === current.id && isActivelyPlaying()){
               reconnecting = false;
               return;
             }
+            // 403 重抓前先等长退避(避免短时间连续重抓轮换签名, 给 CDN 恢复窗口)
+            const backoff = Math.min(4000 * Math.pow(2, reconnectAttempts), 60000);
+            await sleepMs(backoff);
             reconnectAttempts++;
             if (reconnectAttempts > 5){
               // 连续失败 > 5 次: 暂停 120s, 避免 CDN 风暴
@@ -587,6 +609,8 @@ button{font:inherit}
       const fresh = await freshStreamUrl(it.id, subM3u8);
       playUrl = fresh || it.m3u8;
     }
+    // 若子集 m3u8 返回 502(服务端 fetch 超时/CDN 故障), 直接用服务端 60s 缓存里的 m3u8 文本
+    // (避免再打 CDN 撞同一故障窗口, 也不会让 hls.js 拉一个 502 的 manifest 进 fatal)
 
     // 关键修复: Chromium/Electron 的 video.canPlayType('application/vnd.apple.mpegurl')
     // 返回 "maybe"(非空), DPlayer 据此把 type 改回 "normal" 走原生路径,
