@@ -25,7 +25,12 @@
 sh -c 'cd /tmp 2>/dev/null && (git clone -q https://github.com/cheshi888/live-player.git live-player 2>/dev/null || cd live-player && git pull -q) && cd live-player && sh oneclick.sh'
 ```
 
-> 等价于「克隆（已存在则拉取更新）→ 一键部署 → 输出访问地址」。首次与后续更新都用这一行。
+> 首次与后续更新都用这一行。`oneclick.sh` 一条命令全包：
+> - 目录已存在 → `git pull` 更新；不存在 → `git clone` 克隆
+> - **自动检测并安装依赖**：缺 Node.js 或版本 < 18 时按发行版自动装（Ubuntu/Debian 走 `apt`+nodesource，CentOS/RHEL 走 `dnf`/`yum`，macOS 走 `brew`，都不行回退 `nvm` 用户态安装，无需 root）
+> - 生成 `run.sh`（固化 node 绝对路径 + PORT），后台启动 + 30s 健康检查
+> - **Linux + root 自动装 systemd 服务 `live-player.service`**：开机自启 + 崩溃自动拉起（`Restart=on-failure`）；非 root 则提示用 root 重跑
+> - 最终只打印「部署成功/失败 + 访问地址 + 开机自启状态」，不刷屏
 
 ### 分步执行
 
@@ -188,13 +193,20 @@ GET  /api/status            爬虫状态/日志/双定时器
 
 ## 一键部署
 
-### 一行命令（拉取 + 部署，推荐）
+### 一行命令（拉取 + 自动装依赖 + 部署 + 开机自启，推荐）
 
 ```bash
 sh -c 'cd /tmp 2>/dev/null && (git clone -q https://github.com/cheshi888/live-player.git live-player 2>/dev/null || cd live-player && git pull -q) && cd live-player && sh oneclick.sh'
 ```
 
-`oneclick.sh` 自动判断：目录已存在 → `git pull` 更新；不存在 → `git clone` 克隆；然后调用 `deploy.sh` 启动 + 健康检查 + 输出访问地址。
+`oneclick.sh` 一条命令全包，自动判断：
+- 目录已存在 → `git pull` 更新；不存在 → `git clone` 克隆
+- **检测 Node.js 缺失/版本过低 → 按发行版自动安装**（Ubuntu/Debian 走 `apt`+nodesource，CentOS/RHEL 走 `dnf`/`yum`，macOS 走 `brew`，以上都不行回退 `nvm` 用户态安装，无需 root）
+- 生成 `run.sh`（固化 node 绝对路径 + PORT），后台启动 + 30s 健康检查
+- **Linux + root：自动安装 systemd 服务 `live-player.service`（开机自启 + 崩溃自动拉起）**；非 root 提示用 root 重跑
+- 最终只打印：部署成功/失败 + 访问地址 + 开机自启状态（不刷屏）
+
+> 开机自启与崩溃拉起由 systemd 的 `Restart=on-failure` 提供，配合 server.js 内部进程级防线，构成双保险。
 
 ### 分步执行
 
