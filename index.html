@@ -323,7 +323,7 @@ button{font:inherit}
             await load();
             if (current) play(current);
           } else {
-            // 签名真失效 → 单条重抓拿新 auth_key(秒级)
+            // 签名真失效 → 单条重抓拿新 auth_key(秒级), 标记 via=reconnect 便于区分手动/自动
             reconnectAttempts++;
             if (reconnectAttempts > 5){
               // 连续失败 > 5 次: 暂停 120s, 避免 CDN 风暴
@@ -332,14 +332,15 @@ button{font:inherit}
               reconnecting = false;
               return;
             }
-            await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
+            await fetch(API.refresh + '?id=' + current.id + '&via=reconnect', {method:'POST'});
             await sleepMs(3000);
             setStatus('loading','签名已刷新, 重连…');
             await load();
             if (current) play(current);
           }
         } else {
-          await fetch(API.refresh, {method:'POST'});
+          // 无当前源 → 整表 fast 刷新(直播 12 条, ~10s)
+          await fetch(API.refresh + '?via=reconnect', {method:'POST'});
           await sleepMs(2500);
           await load();
         }
@@ -762,10 +763,10 @@ button{font:inherit}
       const cur = current ? current.id : null;
       await load();
       if (cur){ const still = items.find(x=>String(x.id)===cur); current = still || current; }
-      // 主动签名续期: 当前条正在播放且距上次主动刷新 > 4min → 单条重抓(不打全量, 不影响播放)
+      // 主动签名续期: 当前条正在播放且距上次 > 4min → 后台静默单条重抓(via=proactive)
       if (current && !dp.paused && (Date.now() - lastProactiveRefresh) > 240000){
         lastProactiveRefresh = Date.now();
-        fetch(API.refresh + '?id=' + current.id, {method:'POST'}).catch(()=>{});
+        fetch(API.refresh + '?id=' + current.id + '&via=proactive', {method:'POST'}).catch(()=>{});
       }
     }, 60000);
     document.addEventListener('visibilitychange', ()=>{

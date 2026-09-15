@@ -316,7 +316,8 @@ const server = http.createServer((req, res) => {
         const id = url.searchParams.get('id');
         if (id && singleReCrawlAllowed(id)){
           // 单条自愈: 秒级重抓该条详情拿新 m3u8, 不打全量, 不阻塞定时器
-          log("手动单条重抓(#"+id+") → 刷新签名");
+          const via = url.searchParams.get('via') || 'manual';
+          log((via==='reconnect' ? '自动重连单条重抓(#' : '手动单条重抓(#') + id + ") → 刷新签名");
           crawlState.singleId = id;
           const r = runCrawl('single');
           return httpRespond(res, 200, 'application/json', JSON.stringify({ ok:r.ok, single:true, id, message:r.message }));
@@ -364,16 +365,17 @@ const server = http.createServer((req, res) => {
           const atk = it.m3u8.match(/auth_key=([0-9]+)/);
           if (atk){
             const ts = parseInt(atk[1],10);
-            // 91cg1 的 auth_key 第一段是 10 位秒级时间戳
-            diag.authKeySec = ts;
-            diag.authAgeSec = Math.round(Date.now()/1000 - ts);
-            diag.authKeyStale = diag.authAgeSec > 300;   // 超 5min 视为过期风险
+            // 兼容 10 位(秒级) / 13 位(毫秒级)时间戳
+            const nowSec = Math.floor(Date.now()/1000);
+            diag.authKeyTs = ts;
+            diag.authKeyAgeSec = ts > 1e12 ? Math.round(nowSec - Math.floor(ts/1000)) : Math.round(nowSec - ts);
+            diag.authKeyExpired = diag.authKeyAgeSec > 600;  // 超 10min 视为过期
           }
           diag.crawledAt = data.crawledAt;
           if (data.crawledAt) diag.crawlAgeSec = Math.round((Date.now() - new Date(data.crawledAt))/1000);
         }
-        // 3) 最近自愈记录
-        diag.recentHeals = crawlState.log.filter(l => l.includes('#'+id)).slice(-6);
+        // 3) 最近自愈记录(区分手动/自动)
+        diag.recentHeals = crawlState.log.filter(l => l.includes('#'+id)).slice(-8);
         return httpRespond(res, 200, 'application/json', JSON.stringify(diag));
       }
       if (req.method === 'GET' && p.startsWith('/api/probe/')){
