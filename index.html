@@ -286,7 +286,17 @@ button{font:inherit}
   let dp = null;
   let autoPollTimer = null;
   let reconnecting = false;
+  // 播放锁定: 正在出帧的条, 其 m3u8 URL 不被后台重抓轮换(防 hls.js 拿旧 key 403)
+  let playingLock = null;       // { id, url, ts }
+  let lastPlayProgressAt = 0;   // 最近一次 currentTime 推进的时间
   const sleepMs = ms => new Promise(r=>setTimeout(r,ms));
+  function isActivelyPlaying(){
+    // 真实出帧(非转圈): 只看 currentTime 变化(8s 内有推进), 不看 paused
+    // (hls.js 403 时 video.paused 可能仍为 false, 用 currentTime 推进更可靠)
+    const v = dp && dp.video;
+    if (!v || v.currentTime < 0.5) return false;
+    return (Date.now() - lastPlayProgressAt) < 8000;
+  }
 
   // ---------- 智能重连(防风暴) ----------
   // 旧版每个 hls error 都 POST ?id= 单条重抓 → 签名明明 200 有效也反复重抓
@@ -324,6 +334,11 @@ button{font:inherit}
             if (current) play(current);
           } else {
             // 签名真失效 → 单条重抓拿新 auth_key(秒级), 标记 via=reconnect 便于区分手动/自动
+            // 但播放锁保护: 正在出帧则跳过重抓(避免轮换 URL 打死播放), 退避后再试
+            if (playingLock && playingLock.id === current.id && isActivelyPlaying()){
+              reconnecting = false;
+              return;
+            }
             reconnectAttempts++;
             if (reconnectAttempts > 5){
               // 连续失败 > 5 次: 暂停 120s, 避免 CDN 风暴
@@ -544,6 +559,8 @@ button{font:inherit}
 
     if(typeof DPlayer==='undefined'){ setStatus('err','播放器核心未加载'); return; }
     if(dp) dp.destroy();
+    // 切换条目: 释放旧播放锁
+    if (playingLock && playingLock.id !== it.id) playingLock = null;
 
     // 轻量子集(末 6 片)优先 → 秒播; 回退完整 m3u8
     let subM3u8 = null;
@@ -618,12 +635,19 @@ button{font:inherit}
       },
     });
 
+    let lastCt = 0;
     dp.on('timeupdate', function(){
       // 实际出帧推进时, 把 "连接流…" 升级为 "播放中"(DPlayer 的 play 事件不一定按预期触发)
       const v = dp && dp.video;
       if (v && !v.paused && v.currentTime > 0.5){
         const sw = $('#swText');
         if (sw && sw.textContent === '连接流…') setStatus('', '播放中');
+        // 记录出帧推进: currentTime 实际前进才算"在播"(被后台重抓轮换 URL 前锁定)
+        if (v.currentTime > lastCt + 0.05){
+          lastPlayProgressAt = Date.now();
+          if (current) playingLock = { id: current.id, url: playUrl, ts: Date.now() };
+          lastCt = v.currentTime;
+        }
       }
     });
     // hls.js 错误可视化
@@ -724,6 +748,9 @@ button{font:inherit}
       }
       if (d.crawlAgeSec !== undefined) lines.push('爬取于: ' + d.crawlAgeSec + 's 前');
       lines.push('爬虫: ' + (d.crawlRunning ? '<span style="color:var(--warn)">正在爬取('+d.lastRunMode+')</span>' : '空闲'));
+      lines.push('播放锁: ' + (isActivelyPlaying()
+        ? '<span style="color:var(--ok)">✓ 出帧中(后台重抓被抑制, 不会轮换 URL)</span>'
+        : '<span style="color:var(--dim)">未出帧(允许后台签名续期)</span>'));
       if (d.recentHeals && d.recentHeals.length){
         lines.push('自愈记录:');
         d.recentHeals.forEach(l=>lines.push('<span style="color:var(--dim);font-size:11px">'+esc(l)+'</span>'));
@@ -753,7 +780,8 @@ button{font:inherit}
   setInterval(updateRes, 1500);
 
   // ---------- 自动轮询(带可见性门控: 后台 tab 暂停, 回前台立即补一次) ----------
-  // 播放中每 4min 主动单条重抓当前条 m3u8(签名续期), 挡在 403 发生之前
+  // 播放锁保护: 正在出帧的条 → 不重抓(重抓会轮换 m3u8 URL, 把 hls.js 拿旧 key 打死 → 403 风暴);
+  // 只有"未出帧/已暂停/切走"时才后台续期签名(via=proactive, 静默不打扰)
   let lastProactiveRefresh = 0;
   function startAutoPolling(){
     if (autoPollTimer) return;
@@ -763,8 +791,13 @@ button{font:inherit}
       const cur = current ? current.id : null;
       await load();
       if (cur){ const still = items.find(x=>String(x.id)===cur); current = still || current; }
-      // 主动签名续期: 当前条正在播放且距上次 > 4min → 后台静默单条重抓(via=proactive)
-      if (current && !dp.paused && (Date.now() - lastProactiveRefresh) > 240000){
+      // 主动签名续期: 当前条【未在出帧】且距上次 > 4min → 后台静默重抓(播放锁保护)
+      const playingNow = current && isActivelyPlaying();
+      if (playingNow){
+        // 正在出帧: 绝不重抓(会轮换 URL 打死播放), 等 hls.js 真 403 再走 scheduleReconnect
+        return;
+      }
+      if (current && (Date.now() - lastProactiveRefresh) > 240000){
         lastProactiveRefresh = Date.now();
         fetch(API.refresh + '?id=' + current.id + '&via=proactive', {method:'POST'}).catch(()=>{});
       }
