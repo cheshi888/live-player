@@ -1,87 +1,184 @@
 #!/usr/bin/env bash
-# oneclick.sh — 一键拉取并部署
-# 不依赖 ./ 可执行权限(用 sh 调用), 兼容 Ubuntu/CentOS/macOS
-# 最终只输出: 部署成功与否 + 访问地址
+# oneclick.sh — 一键拉取 + 自动装依赖 + 部署 + 开机自启
+# 一行命令 (Ubuntu/CentOS/RHEL/macOS, 首次或更新都用同一条):
+#   sh -c 'cd /tmp 2>/dev/null && (git clone -q https://github.com/cheshi888/live-player.git live-player 2>/dev/null || cd live-player && git pull -q) && cd live-player && sh oneclick.sh'
+#
+# 能力:
+#   1. 自动检测 Node.js, 缺失时按发行版自动安装(apt/dnf/yum/brew/nvm)
+#   2. 后台启动 server.js, 健康检查
+#   3. Linux 下自动装 systemd 服务(开机自启 + 崩溃自动拉起)
+#   4. 最终只打印: 部署成功/失败 + 访问地址 + 自启状态
 set -e
 
-REPO_URL="https://github.com/cheshi888/live-player.git"
 REPO_NAME="live-player"
-
-# ---------- 定位代码目录 ----------
-if [ -f server.js ]; then
-  echo "[oneclick] 已在 live-player 目录, 拉取更新 …"
-  git pull --ff-only 2>/dev/null || true
-elif [ -d "$REPO_NAME/.git" ]; then
-  cd "$REPO_NAME"
-  echo "[oneclick] 已存在 $REPO_NAME, 拉取更新 …"
-  git pull --ff-only 2>/dev/null || true
-else
-  echo "[oneclick] 克隆 $REPO_URL …"
-  git clone -q "$REPO_URL"
-  cd "$REPO_NAME"
-fi
-
-if [ ! -f server.js ]; then
-  echo ""
-  echo "=========================================="
-  echo " ✗ 部署失败: 代码目录异常(缺 server.js)"
-  echo "=========================================="
-  exit 1
-fi
-
-# ---------- Node.js 检查 ----------
-if ! command -v node >/dev/null 2>&1; then
-  echo ""
-  echo "=========================================="
-  echo " ✗ 部署失败: 未检测到 Node.js"
-  echo "   请安装 Node.js >= 18: https://nodejs.org"
-  echo "=========================================="
-  exit 1
-fi
-
 PORT="${PORT:-8090}"
-export PORT
 
-# ---------- 停止旧实例 ----------
-if command -v fuser >/dev/null 2>&1; then
-  fuser -k "${PORT}/tcp" 2>/dev/null || true
-  sleep 1
-elif command -v lsof >/dev/null 2>&1; then
-  PIDS=$(lsof -ti:"${PORT}" 2>/dev/null || true)
-  [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
-  sleep 1
+# ================= 1) 定位代码目录 =================
+if [ -f server.js ]; then
+  git pull --ff-only >/dev/null 2>&1 || true
+elif [ -d "$REPO_NAME/.git" ]; then
+  cd "$REPO_NAME"; git pull --ff-only >/dev/null 2>&1 || true
 fi
+if [ ! -f server.js ]; then
+  echo " ✗ 部署失败: 未找到 server.js (代码目录异常)"
+  exit 1
+fi
+APP_DIR="$(pwd)"
+APP_USER="$(whoami)"
+
+# ================= 2) 检测并自动安装 Node.js =================
+need_node_install=0
+if ! command -v node >/dev/null 2>&1; then
+  need_node_install=1
+else
+  NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+  if [ "$NODE_MAJOR" -lt 18 ]; then
+    need_node_install=1
+  fi
+fi
+
+if [ "$need_node_install" = "1" ]; then
+  echo "[setup] 未检测到 Node.js >= 18, 尝试自动安装 …"
+  installed=0
+  # 1. 包管理器(需 root; 非 root 则失败, 走 nvm)
+  if [ "$(id -u)" = "0" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+        && apt-get install -y nodejs >/dev/null 2>&1) && installed=1
+    elif command -v dnf >/dev/null 2>&1; then
+      (curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+        && dnf install -y nodejs >/dev/null 2>&1) && installed=1
+    elif command -v yum >/dev/null 2>&1; then
+      (curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+        && yum install -y nodejs >/dev/null 2>&1) && installed=1
+    fi
+  elif command -v brew >/dev/null 2>&1; then
+    brew install node >/dev/null 2>&1 && installed=1
+  fi
+  # 2. 包管理器都不行 → 走 nvm(用户态, 无需 root)
+  if [ "$installed" = "0" ]; then
+    echo "[setup] 包管理器安装失败/不可用, 回退 nvm (用户态, 无需 root)"
+    export NVM_DIR="$HOME/.nvm"
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash >/dev/null 2>&1
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    nvm install 20 >/dev/null 2>&1
+    nvm alias default 20 >/dev/null 2>&1
+    command -v node >/dev/null 2>&1 && installed=1
+  fi
+  if [ "$installed" = "0" ]; then
+    echo ""
+    echo "=================================================="
+    echo " ✗ 部署失败: 自动安装 Node.js 全部失败"
+    echo "   请手动安装 Node.js >= 18 后重试: https://nodejs.org"
+    echo "=================================================="
+    exit 1
+  fi
+  # nvm 装的: 把 node 所在目录补进 PATH, 供后续 + systemd 使用
+  NODE_DIR="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)"
+  [ -d "$NODE_DIR/bin" ] && export PATH="$NODE_DIR/bin:$PATH"
+fi
+echo "[setup] Node.js $(node -v) 就绪"
+
+# ================= 3) 停止旧实例 =================
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
+elif command -v lsof >/dev/null 2>&1; then
+  PIDS="$(lsof -ti:"${PORT}" 2>/dev/null || true)"
+  [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
+fi
+sleep 1
 rm -f server.pid
 
-# ---------- 后台启动 ----------
-nohup node server.js > server.log 2>&1 &
-PID=$!
-echo $PID > server.pid
+# ================= 4) 生成 run.sh(systemd 入口, 固化 node 路径 + PORT) =================
+NODE_BIN="$(command -v node)"
+cat > "$APP_DIR/run.sh" <<EOF
+#!/usr/bin/env bash
+# auto-generated by oneclick.sh — systemd / nohup 入口
+cd "$APP_DIR"
+export PORT=${PORT}
+export PATH="$(dirname "$NODE_BIN"):\$PATH"
+exec "$NODE_BIN" server.js
+EOF
+chmod +x "$APP_DIR/run.sh" 2>/dev/null || true
 
-# ---------- 健康检查(最多 30s) ----------
-for i in $(seq 1 30); do
+# ================= 5) 后台启动 + 健康检查 =================
+nohup bash "$APP_DIR/run.sh" > "$APP_DIR/server.log" 2>&1 &
+echo $! > "$APP_DIR/server.pid"
+
+ok=0
+i=0
+while [ "$i" -lt 30 ]; do
   if curl -sf "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1; then
-    # ---------- 成功: 只打印结果 + 链接 ----------
-    echo ""
-    echo "=========================================="
-    echo " ✓ 部署成功  (pid ${PID}, Node $(node -v))"
-    echo ""
-    echo "   访问地址: http://localhost:${PORT}/"
-    echo "   状态:     http://localhost:${PORT}/api/status"
-    echo "   日志:     $(pwd)/server.log"
-    echo ""
-    echo "   停止:     kill \$(cat $(pwd)/server.pid)"
-    echo "=========================================="
-    exit 0
+    ok=1; break
   fi
-  sleep 1
+  i=$((i+1)); sleep 1
 done
 
-# ---------- 失败 ----------
-echo ""
-echo "=========================================="
-echo " ✗ 部署失败: 30s 内未通过健康检查"
-echo "   查看日志: $(pwd)/server.log"
-echo "=========================================="
-tail -n 20 server.log 2>/dev/null || true
-exit 1
+# ================= 6) Linux + root: 装 systemd 服务(开机自启 + 崩溃拉起) =================
+systemd_msg=""
+if [ "$ok" = "1" ] && [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ "$(id -u)" = "0" ]; then
+    UNIT="/etc/systemd/system/live-player.service"
+    cat > "$UNIT" <<EOF
+[Unit]
+Description=91CG Live Player (7x24 always-on)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+WorkingDirectory=$APP_DIR
+Environment=PORT=${PORT}
+ExecStart=/bin/bash $APP_DIR/run.sh
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable live-player.service >/dev/null 2>&1 || true
+    # 停掉刚才手动起的 nohup, 交给 systemd 接管
+    kill "$(cat "$APP_DIR/server.pid" 2>/dev/null)" 2>/dev/null || true
+    sleep 1
+    systemctl start live-player.service >/dev/null 2>&1 || true
+    sleep 2
+    if systemctl is-active live-player.service >/dev/null 2>&1; then
+      systemd_msg="✓ systemd 服务已安装并开机自启 (systemctl status live-player)"
+      # systemd 接管后重新健康检查
+      ok=0; i=0
+      while [ "$i" -lt 20 ]; do
+        if curl -sf "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1; then ok=1; break; fi
+        i=$((i+1)); sleep 1
+      done
+    else
+      systemd_msg="△ systemd 服务安装失败, 当前以手动 nohup 运行(重启后需再跑一次 oneclick.sh)"
+    fi
+  else
+    systemd_msg="△ 非 root 用户, 跳过 systemd 安装(请用 root 跑一次 oneclick.sh 以获得开机自启)"
+  fi
+fi
+
+# ================= 7) 干净输出: 只打印结果 + 链接 + 自启 =================
+if [ "$ok" = "1" ]; then
+  echo ""
+  echo "=================================================="
+  echo " ✓ 部署成功  (Node $(node -v), 端口 ${PORT})"
+  echo ""
+  echo "   访问地址:  http://localhost:${PORT}/"
+  echo "   状态接口:  http://localhost:${PORT}/api/status"
+  echo "   日志:      ${APP_DIR}/server.log"
+  echo ""
+  echo "   开机自启:  ${systemd_msg:-'非 Linux 或无 systemd (重启后可再跑一次 oneclick.sh)'}"
+  echo "=================================================="
+  exit 0
+else
+  echo ""
+  echo "=================================================="
+  echo " ✗ 部署失败: 30s 内未通过健康检查"
+  echo "   查看日志: ${APP_DIR}/server.log"
+  echo "=================================================="
+  tail -n 20 "$APP_DIR/server.log" 2>/dev/null || true
+  exit 1
+fi
