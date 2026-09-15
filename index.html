@@ -288,6 +288,71 @@ button{font:inherit}
   let reconnecting = false;
   const sleepMs = ms => new Promise(r=>setTimeout(r,ms));
 
+  // ---------- 智能重连(防风暴) ----------
+  // 旧版每个 hls error 都 POST ?id= 单条重抓 → 签名明明 200 有效也反复重抓
+  // (重抓会轮换 auth_key, 把正在播的流打死 → 更多 error → 死循环)
+  // 现在: 先探测当前条是否真 403/过期; 只有真失效才单条重抓, 否则只重建播放器静默恢复;
+  // 并加指数退避(2s→4s→8s… 封顶 60s), 60s 内重试 > 5 次则暂停 120s, 防 CDN 风暴。
+  let reconnectAttempts = 0;
+  let reconnectPausedUntil = 0;
+  function scheduleReconnect(reason){
+    if (reconnecting) return;
+    const now = Date.now();
+    if (now < reconnectPausedUntil){
+      setStatus('err','源中断 · 退避中…');
+      return;
+    }
+    reconnecting = true;
+    // 指数退避: 2s, 4s, 8s, 16s, 32s, 60s…
+    const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 60000);
+    setStatus('err','源中断 · ' + Math.round(delay/1000) + 's 后重连(尝试 ' + (reconnectAttempts+1) + ')…');
+    setTimeout(async ()=>{
+      try{
+        if (current){
+          // 先探测: 当前条 m3u8 是否仍可达(签名没死)
+          const pr = await fetch(API.probe(current.id), {cache:'no-store'});
+          let probeOk = false;
+          if (pr.ok){
+            const pj = await pr.json();
+            probeOk = !!(pj && pj.ok);
+          }
+          if (probeOk){
+            // 签名有效, 只是播放器/子集过期 → 直接重建播放器, 不打 CDN 重抓
+            reconnectAttempts = 0;
+            setStatus('loading','重新连接…');
+            await load();
+            if (current) play(current);
+          } else {
+            // 签名真失效 → 单条重抓拿新 auth_key(秒级)
+            reconnectAttempts++;
+            if (reconnectAttempts > 5){
+              // 连续失败 > 5 次: 暂停 120s, 避免 CDN 风暴
+              reconnectPausedUntil = Date.now() + 120000;
+              setStatus('err','源中断 · 连续失败, 120s 后重试');
+              reconnecting = false;
+              return;
+            }
+            await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
+            await sleepMs(3000);
+            setStatus('loading','签名已刷新, 重连…');
+            await load();
+            if (current) play(current);
+          }
+        } else {
+          await fetch(API.refresh, {method:'POST'});
+          await sleepMs(2500);
+          await load();
+        }
+        reconnecting = false;
+      }catch(e){
+        console.warn('[reconnect] 失败:', e);
+        reconnecting = false;
+      }
+    }, delay);
+  }
+  // 播放正常出帧时重置退避计数
+  function resetReconnect(){ reconnectAttempts = 0; }
+
   // 校验子集 m3u8 里的 key/分片是否仍可达(签名未过期)。
   // 直播流 180s 刷新, 子集 20s 缓存: 若 auth_key 过期, key/分片 403,
   // 此时回退到完整 m3u8(CDN 直拉, 浏览器侧拿的是服务端当下缓存的 key, 概率更高)。
@@ -546,30 +611,9 @@ button{font:inherit}
         play(){ setStatus('','播放中'); },
         pause(){ if (!dp || dp.video.readyState < 3) setStatus('loading','已暂停'); },
         waiting(){ setStatus('loading','缓冲中…'); },
-        canplay(){ setStatus('','播放中'); },
+        canplay(){ setStatus('','播放中'); resetReconnect(); },
         ended(){ /* loop 续播 */ },
-        error(){
-          // 签名失效 → 单条自愈: 立即重抓该条拿新 auth_key(秒级), 不打全量, 不等周期
-          setStatus('err','源中断 · 签名刷新中…');
-          if (!reconnecting){
-            reconnecting = true;
-            setTimeout(async ()=>{
-              try{
-                if (current){
-                  await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
-                  await sleepMs(3000);
-                  await load();
-                  if (current) play(current);
-                } else {
-                  await fetch(API.refresh, {method:'POST'});
-                  await sleepMs(2500);
-                  await load();
-                }
-              }catch(e){}
-              reconnecting = false;
-            }, 1500);
-          }
-        },
+        error(){ scheduleReconnect(); },
       },
     });
 
@@ -588,26 +632,7 @@ button{font:inherit}
         if (ph){
           ph.on('hlsError', function(e, data){
             console.warn('[hls.js]', data.type, data.details, 'fatal='+!!data.fatal, data.reason||'');
-            if (data.fatal && !reconnecting){
-              reconnecting = true;
-              // 签名失效 → 单条自愈: 立即重抓该条拿新 auth_key(秒级), 直播/回放通用
-              setStatus('err','源中断 · 签名刷新中(#'+(current?current.id:'?')+')…');
-              setTimeout(async ()=>{
-                try{
-                  if (current){
-                    await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
-                    await sleepMs(3000);
-                    await load();
-                    if (current) play(current);
-                  } else {
-                    await fetch(API.refresh, {method:'POST'});
-                    await sleepMs(2500);
-                    await load();
-                  }
-                }catch(err){}
-                reconnecting = false;
-              }, 1500);
-            }
+            if (data.fatal) scheduleReconnect(data);
           });
         }
       }catch(e){}
@@ -672,7 +697,7 @@ button{font:inherit}
   $('#btnCopy').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
   $('#btnCopy2').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
 
-  // 诊断当前源: m3u8/key/分片可达性 + 签名年龄 + 最近自愈记录
+  // 诊断当前源: 签名年龄 + probe 缓存 + 自愈记录 + 爬虫状态(纯服务端视角, 不打 CDN)
   $('#btnDiag').addEventListener('click', async ()=>{
     if (!current){ setStatus('err','无当前源, 无法诊断'); return; }
     const panel = $('#diagPanel');
@@ -683,29 +708,32 @@ button{font:inherit}
       const d = await r.json();
       const lines = [];
       lines.push('<b>诊断 #'+d.id+' · '+(d.section==='replay'?'回放':'直播')+'</b>');
-      lines.push('m3u8: ' + (d.m3u8Reachable?'<span style="color:var(--ok)">✓ 可达('+d.m3u8Status+')</span>':'<span style="color:var(--live)">✗ 不可达('+d.m3u8Status+')</span>'));
-      if (d.encrypted){
-        lines.push('key:  ' + (d.keyReachable?'<span style="color:var(--ok)">✓ '+d.keyStatus+' ('+d.keyBytes+'B)</span>':'<span style="color:var(--live)">✗ '+d.keyStatus+'</span>'));
+      if (d.authKeyAgeSec !== undefined){
+        const stale = d.authKeyAgeSec > 300;
+        lines.push('签名年龄: ' + d.authKeyAgeSec + 's ' + (stale
+          ? '<span style="color:var(--live)">已过期, 需刷新签名</span>'
+          : '<span style="color:var(--ok)">有效</span>'));
       }
-      if (d.segReachable !== undefined){
-        lines.push('分片: ' + (d.segReachable?'<span style="color:var(--ok)">✓ '+d.segStatus+'</span>':'<span style="color:var(--live)">✗ '+d.segStatus+'</span>'));
+      if (d.m3u8Reachable === true){
+        lines.push('m3u8: <span style="color:var(--ok)">✓ 可达(缓存 '+d.cachedAgeSec+'s 前探测, '+d.segCount+' 片)</span>');
+      } else if (d.m3u8Reachable === null){
+        lines.push('m3u8: <span style="color:var(--warn)">? 无 60s 内缓存(' + (d.note||'') + ')</span>');
+      } else {
+        lines.push('m3u8: <span style="color:var(--live)">✗ 不可达</span>');
       }
-      if (d.authAgeSec !== undefined){
-        const stale = d.authAgeSec > 300;
-        lines.push('签名年龄: ' + d.authAgeSec + 's ' + (stale?'<span style="color:var(--live)">已过期</span>':'<span style="color:var(--ok)">有效</span>'));
-      }
-      if (d.crawlAgeSec !== undefined){
-        lines.push('爬取于: ' + d.crawlAgeSec + 's 前');
-      }
+      if (d.crawlAgeSec !== undefined) lines.push('爬取于: ' + d.crawlAgeSec + 's 前');
+      lines.push('爬虫: ' + (d.crawlRunning ? '<span style="color:var(--warn)">正在爬取('+d.lastRunMode+')</span>' : '空闲'));
       if (d.recentHeals && d.recentHeals.length){
         lines.push('自愈记录:');
         d.recentHeals.forEach(l=>lines.push('<span style="color:var(--dim);font-size:11px">'+esc(l)+'</span>'));
+      } else {
+        lines.push('自愈记录: <span style="color:var(--dim)">无</span>');
       }
       panel.innerHTML = lines.join('<br>');
     }catch(e){
       panel.innerHTML = '<span style="color:var(--live)">诊断失败: '+esc(e.message)+'</span>';
     }
-    setTimeout(()=>{ panel.style.display='none'; }, 15000);
+    setTimeout(()=>{ panel.style.display='none'; }, 20000);
   });
 
   document.addEventListener('keydown',e=>{

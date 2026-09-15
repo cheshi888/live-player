@@ -34,7 +34,7 @@ function m3u8CacheGet(id, m3u8Url){
   return null;
 }
 function m3u8CacheSet(id, entry){
-  M3U8_CACHE.set(String(id), { ...entry, ts: Date.now() });
+  M3U8_CACHE.set(String(id), { ...entry, segCount: (entry.seg||[]).length, ts: Date.now() });
   if (M3U8_CACHE.size > 128) M3U8_CACHE.delete(M3U8_CACHE.keys().next().value);
 }
 function parseM3U8(full, id){
@@ -338,55 +338,42 @@ const server = http.createServer((req, res) => {
         };
         return httpRespond(res, 200, 'application/json', JSON.stringify(snap));
       }
-      // 诊断端点: 看某条源的 m3u8/key/分片可达性 + 签名年龄 + 最近自愈记录
+      // 诊断端点: 纯服务端视角, 不发起新的 CDN 请求(避免消耗一次性 auth_key 使播放失效)
+      // 可达性走 M3U8_CACHE(已有 probe 缓存); 签名年龄从 URL 解析; 自愈记录走 log
       if (req.method === 'GET' && p.startsWith('/api/diag/')){
         const id = p.replace('/api/diag/', '');
         const data = readSources();
         const it = (data.items||[]).find(x => String(x.id)===String(id));
         if (!it) return httpRespond(res, 404, 'application/json', JSON.stringify({ ok:false, message:'未找到 id='+id }));
         const diag = { ok:true, id, section:it.section, title:it.title };
-        // 1) m3u8 可达性
-        diag.m3u8Reachable = false;
-        diag.m3u8Status = null;
-        try {
-          const r = await fetch(it.m3u8, { headers:{ 'User-Agent':UA, 'Referer': it.detailUrl||'https://www.91cg1.com/' }, signal: AbortSignal.timeout(15000) });
-          diag.m3u8Status = r.status;
-          diag.m3u8Reachable = r.ok;
-          if (r.ok){
-            const txt = await r.text();
-            const keyM = txt.match(/#EXT-X-KEY:METHOD=(\S+?),URI="([^"]+)"/);
-            const segM = txt.match(/^https?:\/\/\S+$/m);
-            diag.encrypted = !!keyM;
-            // 2) key 可达性
-            if (keyM){
-              const kr = await fetch(keyM[2], { signal: AbortSignal.timeout(15000), method:'GET' });
-              diag.keyReachable = kr.ok;
-              diag.keyStatus = kr.status;
-              diag.keyBytes = kr.ok ? (await kr.arrayBuffer()).byteLength : 0;
-            }
-            // 3) 首个分片可达性
-            if (segM){
-              const sr = await fetch(segM[0], { signal: AbortSignal.timeout(15000), method:'GET' });
-              diag.segReachable = sr.ok;
-              diag.segStatus = sr.status;
-            }
-          }
-        } catch(e){ diag.m3u8Status = 'ERR:'+String(e.message||e).slice(0,50); }
-        // 4) 签名年龄(m3u8 URL 里 auth_key 的时间戳 vs now)
+        // 1) 已缓存 probe(不重新打 CDN; 若有 60s 内缓存则报可达)
+        const cached = M3U8_CACHE.get(String(id));
+        if (cached){
+          diag.m3u8Reachable = true;
+          diag.m3u8Status = 200;
+          diag.cachedAgeSec = Math.round((Date.now() - cached.ts)/1000);
+          diag.segCount = cached.segCount;
+          diag.encrypted = cached.encrypted;
+        } else {
+          diag.m3u8Reachable = null;   // 未知(无缓存, 不主动打 CDN 探测)
+          diag.m3u8Status = null;
+          diag.note = '无 60s 内 probe 缓存, 可达性以实际播放为准(点播放会自动探测)';
+        }
+        // 2) 签名年龄(m3u8 URL 里 auth_key=<秒级时间戳>-rand-rand-0 vs now)
         if (it.m3u8){
-          const atk = it.m3u8.match(/auth_key=([^&]+)/);
+          const atk = it.m3u8.match(/auth_key=([0-9]+)/);
           if (atk){
-            // auth_key 格式: 毫秒时间戳-随机-随机-0
-            const tsStr = atk[1].split('-')[0];
-            const ts = parseInt(tsStr,10);
-            if (ts > 1e12) diag.authAgeSec = Math.round((Date.now()/1000 - ts));
-            else if (ts > 1e9) diag.authAgeSec = Math.round(Date.now()/1000 - ts);
+            const ts = parseInt(atk[1],10);
+            // 91cg1 的 auth_key 第一段是 10 位秒级时间戳
+            diag.authKeySec = ts;
+            diag.authAgeSec = Math.round(Date.now()/1000 - ts);
+            diag.authKeyStale = diag.authAgeSec > 300;   // 超 5min 视为过期风险
           }
           diag.crawledAt = data.crawledAt;
           if (data.crawledAt) diag.crawlAgeSec = Math.round((Date.now() - new Date(data.crawledAt))/1000);
         }
-        // 5) 最近自愈记录
-        diag.recentHeals = crawlState.log.filter(l => l.includes('#'+id)).slice(-5);
+        // 3) 最近自愈记录
+        diag.recentHeals = crawlState.log.filter(l => l.includes('#'+id)).slice(-6);
         return httpRespond(res, 200, 'application/json', JSON.stringify(diag));
       }
       if (req.method === 'GET' && p.startsWith('/api/probe/')){
