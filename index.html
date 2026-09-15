@@ -135,6 +135,9 @@ button{font:inherit}
 .sw.err{background:var(--live)}
 .sw.loading{background:var(--warn);animation:blink .8s infinite}
 .copybtn{margin-left:auto}
+.diagpanel{margin-top:10px;padding:12px 14px;border-radius:12px;background:rgba(20,197,166,.05);
+  border:1px solid rgba(20,197,166,.25);font-size:12px;line-height:1.8;color:var(--dim)}
+.diagpanel .diag-loading{color:var(--acc);font-weight:600}
 .dplayer .dplayer-controller .dplayer-icon{color:#fff}
 .dplayer .dplayer-mask{background:#04060b}
 
@@ -253,11 +256,16 @@ button{font:inherit}
       <div class="infobar">
         <span class="ib-chip"><span class="sw" id="sw"></span><span id="swText">已就绪</span></span>
         <span class="ib-chip">分辨率 <b id="resInfo">–</b></span>
+        <button class="btn copybtn" id="btnDiag" title="诊断当前源签名/可达性">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 15h.01"/></svg>
+          诊断
+        </button>
         <button class="btn copybtn" id="btnCopy2">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4V4h11v1"/></svg>
           复制 m3u8
         </button>
       </div>
+      <div class="diagpanel" id="diagPanel" style="display:none"></div>
     </div>
   </main>
 </div>
@@ -265,7 +273,7 @@ button{font:inherit}
 <script>
 (function(){
   const $ = s => document.querySelector(s);
-  const API = { sources:'/api/sources', refresh:'/api/refresh', probe:(id)=>'/api/probe/'+id, stream:(id)=>'/api/stream/'+id };
+  const API = { sources:'/api/sources', refresh:'/api/refresh', probe:(id)=>'/api/probe/'+id, stream:(id)=>'/api/stream/'+id, diag:(id)=>'/api/diag/'+id };
 
   const PAGE_SIZE = 30;          // 每页展示的回放条数
   let items = [];                // 全量(带 m3u8)
@@ -541,18 +549,25 @@ button{font:inherit}
         canplay(){ setStatus('','播放中'); },
         ended(){ /* loop 续播 */ },
         error(){
-          setStatus('err','源中断 · 自动重连…');
+          // 签名失效 → 单条自愈: 立即重抓该条拿新 auth_key(秒级), 不打全量, 不等周期
+          setStatus('err','源中断 · 签名刷新中…');
           if (!reconnecting){
             reconnecting = true;
             setTimeout(async ()=>{
               try{
-                await fetch(API.refresh,{method:'POST'});
-                await sleepMs(2500);
-                await load();
-                if (current) play(current);
+                if (current){
+                  await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
+                  await sleepMs(3000);
+                  await load();
+                  if (current) play(current);
+                } else {
+                  await fetch(API.refresh, {method:'POST'});
+                  await sleepMs(2500);
+                  await load();
+                }
               }catch(e){}
               reconnecting = false;
-            }, 1800);
+            }, 1500);
           }
         },
       },
@@ -575,16 +590,23 @@ button{font:inherit}
             console.warn('[hls.js]', data.type, data.details, 'fatal='+!!data.fatal, data.reason||'');
             if (data.fatal && !reconnecting){
               reconnecting = true;
-              setStatus('err','源中断 · 自动重连…');
+              // 签名失效 → 单条自愈: 立即重抓该条拿新 auth_key(秒级), 直播/回放通用
+              setStatus('err','源中断 · 签名刷新中(#'+(current?current.id:'?')+')…');
               setTimeout(async ()=>{
                 try{
-                  await fetch(API.refresh,{method:'POST'});
-                  await sleepMs(2500);
-                  await load();
-                  if (current) play(current);
+                  if (current){
+                    await fetch(API.refresh + '?id=' + current.id, {method:'POST'});
+                    await sleepMs(3000);
+                    await load();
+                    if (current) play(current);
+                  } else {
+                    await fetch(API.refresh, {method:'POST'});
+                    await sleepMs(2500);
+                    await load();
+                  }
                 }catch(err){}
                 reconnecting = false;
-              }, 1800);
+              }, 1500);
             }
           });
         }
@@ -650,6 +672,42 @@ button{font:inherit}
   $('#btnCopy').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
   $('#btnCopy2').addEventListener('click',()=>{ if(current) copyText(current.m3u8); });
 
+  // 诊断当前源: m3u8/key/分片可达性 + 签名年龄 + 最近自愈记录
+  $('#btnDiag').addEventListener('click', async ()=>{
+    if (!current){ setStatus('err','无当前源, 无法诊断'); return; }
+    const panel = $('#diagPanel');
+    panel.style.display = 'block';
+    panel.innerHTML = '<div class="diag-loading">诊断中 #'+current.id+' …</div>';
+    try{
+      const r = await fetch(API.diag(current.id), {cache:'no-store'});
+      const d = await r.json();
+      const lines = [];
+      lines.push('<b>诊断 #'+d.id+' · '+(d.section==='replay'?'回放':'直播')+'</b>');
+      lines.push('m3u8: ' + (d.m3u8Reachable?'<span style="color:var(--ok)">✓ 可达('+d.m3u8Status+')</span>':'<span style="color:var(--live)">✗ 不可达('+d.m3u8Status+')</span>'));
+      if (d.encrypted){
+        lines.push('key:  ' + (d.keyReachable?'<span style="color:var(--ok)">✓ '+d.keyStatus+' ('+d.keyBytes+'B)</span>':'<span style="color:var(--live)">✗ '+d.keyStatus+'</span>'));
+      }
+      if (d.segReachable !== undefined){
+        lines.push('分片: ' + (d.segReachable?'<span style="color:var(--ok)">✓ '+d.segStatus+'</span>':'<span style="color:var(--live)">✗ '+d.segStatus+'</span>'));
+      }
+      if (d.authAgeSec !== undefined){
+        const stale = d.authAgeSec > 300;
+        lines.push('签名年龄: ' + d.authAgeSec + 's ' + (stale?'<span style="color:var(--live)">已过期</span>':'<span style="color:var(--ok)">有效</span>'));
+      }
+      if (d.crawlAgeSec !== undefined){
+        lines.push('爬取于: ' + d.crawlAgeSec + 's 前');
+      }
+      if (d.recentHeals && d.recentHeals.length){
+        lines.push('自愈记录:');
+        d.recentHeals.forEach(l=>lines.push('<span style="color:var(--dim);font-size:11px">'+esc(l)+'</span>'));
+      }
+      panel.innerHTML = lines.join('<br>');
+    }catch(e){
+      panel.innerHTML = '<span style="color:var(--live)">诊断失败: '+esc(e.message)+'</span>';
+    }
+    setTimeout(()=>{ panel.style.display='none'; }, 15000);
+  });
+
   document.addEventListener('keydown',e=>{
     if(e.target.tagName==='INPUT') return;
     if(e.key>='1'&&e.key<='9'){
@@ -666,6 +724,8 @@ button{font:inherit}
   setInterval(updateRes, 1500);
 
   // ---------- 自动轮询(带可见性门控: 后台 tab 暂停, 回前台立即补一次) ----------
+  // 播放中每 4min 主动单条重抓当前条 m3u8(签名续期), 挡在 403 发生之前
+  let lastProactiveRefresh = 0;
   function startAutoPolling(){
     if (autoPollTimer) return;
     autoPollTimer = setInterval(async ()=>{
@@ -674,6 +734,11 @@ button{font:inherit}
       const cur = current ? current.id : null;
       await load();
       if (cur){ const still = items.find(x=>String(x.id)===cur); current = still || current; }
+      // 主动签名续期: 当前条正在播放且距上次主动刷新 > 4min → 单条重抓(不打全量, 不影响播放)
+      if (current && !dp.paused && (Date.now() - lastProactiveRefresh) > 240000){
+        lastProactiveRefresh = Date.now();
+        fetch(API.refresh + '?id=' + current.id, {method:'POST'}).catch(()=>{});
+      }
     }, 60000);
     document.addEventListener('visibilitychange', ()=>{
       if (!document.hidden && current){ load(); }   // 回前台: 立即刷新一回

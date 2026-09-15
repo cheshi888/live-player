@@ -155,6 +155,72 @@ const liveOnly = ARGS.includes('--live-only') || (ARGS.length === 0 && !includeR
   // 解析参数: 输出路径 = 第一个非开关参数, 默认 live_sources.json
   const outPath = OUT_ARG;
 
+  // ---------- 单条模式快速通道: 跳过 3 个列表页, 直抓 1 个详情页(秒级) ----------
+  // 旧版 --single 仍走全列表(3s+), 现在只抓该条详情, 沿用 prior JSON 的元数据
+  if (isSingle && SINGLE_ID){
+    console.log(`[crawl] 单条快速重抓 #${SINGLE_ID} (跳过列表页, 直抓详情) …`);
+    let prior = null;
+    try { if (fs.existsSync(outPath)) prior = JSON.parse(fs.readFileSync(outPath,'utf8')); } catch(e){}
+    const priorItem = (prior && prior.items || []).find(x => String(x.id) === String(SINGLE_ID));
+    const target = {
+      id: SINGLE_ID,
+      section: priorItem ? priorItem.section : 'replay',
+      status: priorItem ? priorItem.status : 'unknown',
+      url: `${BASE}/category/sstp/video/${SINGLE_ID}/`,
+      sectionLabel: priorItem ? priorItem.sectionLabel : '',
+    };
+    let rec;
+    try {
+      const html = await get(target.url, 2);
+      rec = parseDetail(html, SINGLE_ID);
+      rec.status = target.status;
+      rec.section = target.section;
+      rec.sectionLabel = target.sectionLabel;
+      if (priorItem){
+        // 沿用旧条目的元数据(标题/封面/alsoLive), 新抓的 m3u8 覆盖
+        rec.title = priorItem.title || rec.title;
+        rec.cover = priorItem.cover || rec.cover;
+        if (priorItem.alsoLive) rec.alsoLive = true;
+      }
+      rec.hasM3u8 = !!rec.m3u8;
+      if (!rec.m3u8 && priorItem && priorItem.m3u8){
+        rec.m3u8 = priorItem.m3u8; rec.hasM3u8 = true; rec.m3u8From = 'prior';
+        console.log(`[crawl]   #${SINGLE_ID} 新抓无 m3u8, 沿用 prior 旧 m3u8`);
+      }
+    } catch(e){
+      console.log(`[crawl]   #${SINGLE_ID} 详情抓取失败: ${e.message}, 沿用 prior`);
+      rec = { ...target, m3u8: priorItem ? priorItem.m3u8 : '', hasM3u8: !!(priorItem && priorItem.m3u8),
+              title: priorItem ? priorItem.title : '', error: String(e.message||e),
+              m3u8From: priorItem && priorItem.m3u8 ? 'prior' : undefined };
+    }
+    // 合并回 prior(替换该条), 原子写
+    const priorItems = (prior && prior.items) ? prior.items.slice() : [];
+    const idx = priorItems.findIndex(x => String(x.id) === String(SINGLE_ID));
+    if (idx >= 0) priorItems[idx] = { ...priorItems[idx], ...rec };
+    else priorItems.push({ ...target, ...rec, detailUrl: target.url });
+    const out = {
+      source: SECTIONS.map(s=>s.url).join(' ; '),
+      crawledAt: new Date().toISOString(),
+      total: priorItems.length,
+      bySection: {},
+      online: priorItems.filter(r=>r.status==='online' && r.hasM3u8).length,
+      items: priorItems,
+    };
+    for (const r of priorItems){
+      out.bySection[r.section] = out.bySection[r.section]||{ total:0, online:0 };
+      out.bySection[r.section].total++;
+      if (r.status==='online' && r.hasM3u8) out.bySection[r.section].online++;
+      if (r.alsoLive){
+        out.bySection.live = out.bySection.live||{ total:0, online:0 };
+        out.bySection.live.total++;
+        if (r.status==='online' && r.hasM3u8) out.bySection.live.online++;
+      }
+    }
+    atomicWriteJSON(outPath, out);
+    console.log(`[crawl] 单条完成 #${SINGLE_ID}: ${rec.hasM3u8?'✓ m3u8 已刷新':'沿用旧 m3u8'} (${rec.m3u8From||'new'})`);
+    process.exit(rec.hasM3u8 ? 0 : 1);
+  }
+
   const seen = new Set();
   const allCards = [];
 

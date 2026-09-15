@@ -17,7 +17,7 @@ const ROOT = __dirname;
 const SOURCES = path.join(ROOT, 'live_sources.json');
 const CRAWLER = path.join(ROOT, 'crawl_91cg1.js');
 const REFRESH_SEC = parseInt(process.env.REFRESH_SEC || '180', 10);    // 直播快刷间隔
-const REPLAY_REFRESH_SEC = parseInt(process.env.REPLAY_REFRESH_SEC || '1800', 10); // 回放刷 30min
+const REPLAY_REFRESH_SEC = parseInt(process.env.REPLAY_REFRESH_SEC || '600', 10); // 回放刷 10min(更快恢复签名)
 const PROBE_KEEP = parseInt(process.env.PROBE_KEEP || '6', 10);
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36';
@@ -172,6 +172,8 @@ function runCrawl(mode){
 }
 
 // ---------- 流探测: 末尾子集 m3u8 秒播(这些流是准直播 VOD: 固定片 + ENDLIST + 不滚动) ----------
+// 签名失效自愈: 立即单条重抓(--single, 秒级拿新 auth_key), 不再盲等 30min 周期
+// (回放 VOD 签名同样会过期, 旧版前端 403 只触 fast(只刷直播) → 回放死等 → "源中断·自动重连"循环)
 async function probeStream(id){
   const data = readSources();
   const it = (data.items||[]).find(x => String(x.id)===String(id));
@@ -185,8 +187,10 @@ async function probeStream(id){
     const stale = /HTTP (403|404)/.test(String(e.message));
     if (stale && singleReCrawlAllowed(id)){
       // 签名死了 → 单条重爬(--single, 秒级)拿新 m3u8, 不打全量, 不阻塞定时器
-      log("探测 m3u8 签名失效(#"+id+") → 单条重爬");
+      // 直播/回播放一样处理: 无论 section, 单条重抓都能拿到新 auth_key
+      log("探测 m3u8 签名失效(#"+id+", section="+it.section+") → 单条重爬");
       crawlState.singleId = id;
+      const started = Date.now();
       runCrawl('single');
       await sleep(2500);
       const data2 = readSources();
@@ -195,9 +199,11 @@ async function probeStream(id){
         try {
           entry = await fetchM3U8Cached(id, it2.m3u8, it2.detailUrl);
           it.m3u8 = it2.m3u8; writeSources(data2);
+          log("单条自愈成功(#"+id+") 耗时 "+((Date.now()-started)/1000).toFixed(1)+"s");
         } catch(e2){ return { ok:false, message:'单条重爬后重试失败: '+e2.message, http:502 }; }
       } else {
         // 单条重爬没拿到新 m3u8(源站可能临时下线): 原 URL 再试一次
+        log("单条重爬无新源(#"+id+") → 原 URL 重试");
         try {
           M3U8_CACHE.delete(String(id));
           entry = await fetchM3U8Cached(id, it.m3u8, it.detailUrl);
@@ -305,7 +311,16 @@ const server = http.createServer((req, res) => {
         return res.end(body);
       }
       if (req.method === 'POST' && p === '/api/refresh'){
-        // ?full=1 抓全部三栏目(含回放 680 条); 默认 fast(热门+监控, 保直播流新鲜)
+        // ?id=<id> 单条重抓(秒级拿新 auth_key, 直播/回放通用, 播放 403 自愈用)
+        // ?full=1 抓全部三栏目; 默认 fast(热门+监控, 保直播流新鲜)
+        const id = url.searchParams.get('id');
+        if (id && singleReCrawlAllowed(id)){
+          // 单条自愈: 秒级重抓该条详情拿新 m3u8, 不打全量, 不阻塞定时器
+          log("手动单条重抓(#"+id+") → 刷新签名");
+          crawlState.singleId = id;
+          const r = runCrawl('single');
+          return httpRespond(res, 200, 'application/json', JSON.stringify({ ok:r.ok, single:true, id, message:r.message }));
+        }
         const mode = url.searchParams.get('full') ? 'full' : 'fast';
         const r = runCrawl(mode);
         return httpRespond(res, 200, 'application/json', JSON.stringify(r));
@@ -318,9 +333,61 @@ const server = http.createServer((req, res) => {
           lastSuccess: crawlState.lastSuccess,
           nextRefreshAt: crawlState.nextRefreshAt ? new Date(crawlState.nextRefreshAt).toISOString() : null,
           refreshSec: REFRESH_SEC,
+          replayRefreshSec: REPLAY_REFRESH_SEC,
           logTail: crawlState.log.slice(-40),
         };
         return httpRespond(res, 200, 'application/json', JSON.stringify(snap));
+      }
+      // 诊断端点: 看某条源的 m3u8/key/分片可达性 + 签名年龄 + 最近自愈记录
+      if (req.method === 'GET' && p.startsWith('/api/diag/')){
+        const id = p.replace('/api/diag/', '');
+        const data = readSources();
+        const it = (data.items||[]).find(x => String(x.id)===String(id));
+        if (!it) return httpRespond(res, 404, 'application/json', JSON.stringify({ ok:false, message:'未找到 id='+id }));
+        const diag = { ok:true, id, section:it.section, title:it.title };
+        // 1) m3u8 可达性
+        diag.m3u8Reachable = false;
+        diag.m3u8Status = null;
+        try {
+          const r = await fetch(it.m3u8, { headers:{ 'User-Agent':UA, 'Referer': it.detailUrl||'https://www.91cg1.com/' }, signal: AbortSignal.timeout(15000) });
+          diag.m3u8Status = r.status;
+          diag.m3u8Reachable = r.ok;
+          if (r.ok){
+            const txt = await r.text();
+            const keyM = txt.match(/#EXT-X-KEY:METHOD=(\S+?),URI="([^"]+)"/);
+            const segM = txt.match(/^https?:\/\/\S+$/m);
+            diag.encrypted = !!keyM;
+            // 2) key 可达性
+            if (keyM){
+              const kr = await fetch(keyM[2], { signal: AbortSignal.timeout(15000), method:'GET' });
+              diag.keyReachable = kr.ok;
+              diag.keyStatus = kr.status;
+              diag.keyBytes = kr.ok ? (await kr.arrayBuffer()).byteLength : 0;
+            }
+            // 3) 首个分片可达性
+            if (segM){
+              const sr = await fetch(segM[0], { signal: AbortSignal.timeout(15000), method:'GET' });
+              diag.segReachable = sr.ok;
+              diag.segStatus = sr.status;
+            }
+          }
+        } catch(e){ diag.m3u8Status = 'ERR:'+String(e.message||e).slice(0,50); }
+        // 4) 签名年龄(m3u8 URL 里 auth_key 的时间戳 vs now)
+        if (it.m3u8){
+          const atk = it.m3u8.match(/auth_key=([^&]+)/);
+          if (atk){
+            // auth_key 格式: 毫秒时间戳-随机-随机-0
+            const tsStr = atk[1].split('-')[0];
+            const ts = parseInt(tsStr,10);
+            if (ts > 1e12) diag.authAgeSec = Math.round((Date.now()/1000 - ts));
+            else if (ts > 1e9) diag.authAgeSec = Math.round(Date.now()/1000 - ts);
+          }
+          diag.crawledAt = data.crawledAt;
+          if (data.crawledAt) diag.crawlAgeSec = Math.round((Date.now() - new Date(data.crawledAt))/1000);
+        }
+        // 5) 最近自愈记录
+        diag.recentHeals = crawlState.log.filter(l => l.includes('#'+id)).slice(-5);
+        return httpRespond(res, 200, 'application/json', JSON.stringify(diag));
       }
       if (req.method === 'GET' && p.startsWith('/api/probe/')){
         const id = p.replace('/api/probe/','');

@@ -114,50 +114,143 @@ while [ "$i" -lt 30 ]; do
   i=$((i+1)); sleep 1
 done
 
-# ================= 6) Linux + root: 装 systemd 服务(开机自启 + 崩溃拉起) =================
+# ================= 6) 开机自启: 优先 systemd, 降级 cron @reboot =================
 systemd_msg=""
-if [ "$ok" = "1" ] && [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
-  if [ "$(id -u)" = "0" ]; then
-    UNIT="/etc/systemd/system/live-player.service"
-    cat > "$UNIT" <<EOF
+
+try_systemd_root(){
+  # root 级 systemd 服务
+  local UNIT="/etc/systemd/system/live-player.service"
+  cat > "$UNIT" <<EOF
 [Unit]
 Description=91CG Live Player (7x24 always-on)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=forking
+Type=simple
 WorkingDirectory=$APP_DIR
 Environment=PORT=${PORT}
 ExecStart=/bin/bash $APP_DIR/run.sh
 Restart=on-failure
 RestartSec=5
-User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable live-player.service >/dev/null 2>&1 || true
-    # 停掉刚才手动起的 nohup, 交给 systemd 接管
-    kill "$(cat "$APP_DIR/server.pid" 2>/dev/null)" 2>/dev/null || true
-    sleep 1
-    systemctl start live-player.service >/dev/null 2>&1 || true
-    sleep 2
-    if systemctl is-active live-player.service >/dev/null 2>&1; then
-      systemd_msg="✓ systemd 服务已安装并开机自启 (systemctl status live-player)"
-      # systemd 接管后重新健康检查
-      ok=0; i=0
-      while [ "$i" -lt 20 ]; do
-        if curl -sf "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1; then ok=1; break; fi
-        i=$((i+1)); sleep 1
-      done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if ! systemctl enable live-player.service >/dev/null 2>&1; then
+    echo "[systemd] enable 失败: $(systemctl enable live-player.service 2>&1 | head -3)"
+    return 1
+  fi
+  # 停掉手动 nohup, 交给 systemd 接管
+  kill "$(cat "$APP_DIR/server.pid" 2>/dev/null)" 2>/dev/null || true
+  sleep 1
+  if ! systemctl start live-player.service >/dev/null 2>&1; then
+    echo "[systemd] start 失败: $(systemctl start live-player.service 2>&1 | head -3)"
+    echo "[systemd] journalctl: $(journalctl -u live-player.service -n 8 --no-pager 2>/dev/null | tail -6)"
+    return 1
+  fi
+  sleep 2
+  if ! systemctl is-active live-player.service >/dev/null 2>&1; then
+    echo "[systemd] 服务未 active: $(systemctl status live-player.service --no-pager 2>/dev/null | head -5)"
+    echo "[systemd] journalctl: $(journalctl -u live-player.service -n 10 --no-pager 2>/dev/null | tail -8)"
+    return 1
+  fi
+  return 0
+}
+
+try_systemd_user(){
+  # 非 root 走 user-level systemd(需 loginctl enable-linger 保持开机自启)
+  local UNIT="$HOME/.config/systemd/user/live-player.service"
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$UNIT" <<EOF
+[Unit]
+Description=91CG Live Player (user, 7x24 always-on)
+
+[Service]
+Type=simple
+WorkingDirectory=$APP_DIR
+Environment=PORT=${PORT}
+ExecStart=/bin/bash $APP_DIR/run.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user enable --now live-player.service >/dev/null 2>&1 || true
+  # 允许无登录时运行(开机自启关键)
+  loginctl enable-linger "$APP_USER" >/dev/null 2>&1 || true
+  sleep 2
+  if systemctl --user is-active live-player.service >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[systemd-user] 失败: $(systemctl --user status live-player.service --no-pager 2>/dev/null | head -5)"
+  return 1
+}
+
+try_cron_reboot(){
+  # 终极兜底: cron @reboot(无 systemd 也能开机自启)
+  local CRON_LINE="@reboot /bin/bash $APP_DIR/run.sh >> $APP_DIR/server.log 2>&1"
+  local EXIST
+  EXIST="$(crontab -l 2>/dev/null | grep -F "live-player/run.sh" || true)"
+  if [ -n "$EXIST" ]; then
+    crontab -l 2>/dev/null | grep -vF "live-player/run.sh" | { crontab - 2>/dev/null || true; }
+  fi
+  ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab - 2>/dev/null || true
+  # cron 方案不能"现在"拉起, 需手动 nohup
+  nohup bash "$APP_DIR/run.sh" > "$APP_DIR/server.log" 2>&1 &
+  echo $! > "$APP_DIR/server.pid"
+  sleep 1
+  return 0
+}
+
+if [ "$(uname -s)" = "Linux" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    if [ "$(id -u)" = "0" ]; then
+      if try_systemd_root; then
+        systemd_msg="✓ systemd(root) 服务已安装并开机自启 (systemctl status live-player)"
+        # systemd 接管后重新健康检查
+        ok=0; i=0
+        while [ "$i" -lt 20 ]; do
+          if curl -sf "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1; then ok=1; break; fi
+          i=$((i+1)); sleep 1
+        done
+      else
+        systemd_msg="△ root systemd 失败, 尝试降级 cron @reboot"
+      fi
     else
-      systemd_msg="△ systemd 服务安装失败, 当前以手动 nohup 运行(重启后需再跑一次 oneclick.sh)"
+      if try_systemd_user; then
+        systemd_msg="✓ systemd(user) 服务已安装并开机自启 (systemctl --user status live-player)"
+        ok=0; i=0
+        while [ "$i" -lt 20 ]; do
+          if curl -sf "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1; then ok=1; break; fi
+          i=$((i+1)); sleep 1
+        done
+      else
+        systemd_msg="△ user systemd 失败, 尝试降级 cron @reboot"
+      fi
+    fi
+    # 任一 systemd 失败都再兜底 cron
+    if [[ "$systemd_msg" == △* ]] && command -v crontab >/dev/null 2>&1; then
+      if try_cron_reboot; then
+        systemd_msg="△ systemd 不可用, 已用 cron @reboot 兜底开机自启(重启后需服务自恢复)"
+      else
+        systemd_msg="△ 开机自启安装失败(systemd 与 cron 都不可用), 当前仅本次运行"
+      fi
     fi
   else
-    systemd_msg="△ 非 root 用户, 跳过 systemd 安装(请用 root 跑一次 oneclick.sh 以获得开机自启)"
+    # 无 systemctl(极简容器/非 systemd 系统) → cron
+    if command -v crontab >/dev/null 2>&1; then
+      try_cron_reboot
+      systemd_msg="△ 无 systemd, 已用 cron @reboot 兜底开机自启"
+    else
+      systemd_msg="✗ 无法安装开机自启(无 systemd 也无 cron)"
+    fi
   fi
+else
+  systemd_msg="△ 非 Linux ($(uname -s)), 无开机自启(重启后重跑 oneclick.sh)"
 fi
 
 # ================= 7) 干净输出: 只打印结果 + 链接 + 自启 =================
@@ -171,6 +264,22 @@ if [ "$ok" = "1" ]; then
   echo "   日志:      ${APP_DIR}/server.log"
   echo ""
   echo "   开机自启:  ${systemd_msg:-'非 Linux 或无 systemd (重启后可再跑一次 oneclick.sh)'}"
+  if [[ "$systemd_msg" == △* || "$systemd_msg" == ✗* ]]; then
+    echo ""
+    echo "   --- 开机自启诊断 (Ubuntu VPS) ---"
+    echo "   systemd 单元:  systemctl status live-player --no-pager"
+    echo "   最近日志:      journalctl -u live-player -n 30 --no-pager"
+    echo "   单元文件:      cat /etc/systemd/system/live-player.service"
+    echo "   端口占用:      ss -lntp | grep ${PORT}"
+    echo "   若用 cron:     crontab -l | grep live-player"
+    echo "   手动验证自启:  systemctl restart live-player && systemctl is-active live-player"
+  fi
+  echo ""
+  echo "   --- 播放诊断 (源码中断时) ---"
+  echo "   单条诊断:  curl http://localhost:${PORT}/api/diag/<视频id>"
+  echo "   单条自愈:  curl -X POST http://localhost:${PORT}/api/refresh?id=<视频id>"
+  echo "   爬虫日志:  tail -n 40 ${APP_DIR}/server.log | grep 单条"
+  echo "   状态:      curl http://localhost:${PORT}/api/status"
   echo "=================================================="
   exit 0
 else
@@ -178,6 +287,7 @@ else
   echo "=================================================="
   echo " ✗ 部署失败: 30s 内未通过健康检查"
   echo "   查看日志: ${APP_DIR}/server.log"
+  echo "   端口占用: ss -lntp | grep ${PORT}"
   echo "=================================================="
   tail -n 20 "$APP_DIR/server.log" 2>/dev/null || true
   exit 1
